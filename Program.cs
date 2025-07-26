@@ -33,19 +33,14 @@ _ = Task.Run(() => paymentPoller.RunAsync(), cancellationToken);
 
 // Обробка оновлень
 botClient.StartReceiving(
-    updateHandler: async (client, update, token) =>
-    {
-        if (update.Type == Telegram.Bot.Types.Enums.UpdateType.Message)
-            await MessageHandler.HandleMessageAsync(client, update, token);
-        else if (update.Type == Telegram.Bot.Types.Enums.UpdateType.CallbackQuery)
-            await CallbackHandler.HandleCallbackAsync(client, update, token);
-    },
+    updateHandler: UpdateRouter.HandleUpdateAsync,
     pollingErrorHandler: async (client, exception, token) =>
     {
         Console.WriteLine($"❌ Telegram API Error: {exception.Message}");
     },
     cancellationToken: cancellationToken
 );
+
 
 // Зупинка по Ctrl+C
 Console.CancelKeyPress += (sender, args) =>
@@ -59,8 +54,10 @@ await Task.Delay(-1, cancellationToken);
 // Доступ до PaymentService з інших класів
 public partial class Program
 {
-    public static string BotUsername = "@BARACHOLKA_UA_bot";
-    public static string ChannelUsername = "@baraholka_market_ua";
-    public static long AdminChatId = 6764916214;
+    public static string BotUsername = Environment.GetEnvironmentVariable("BOT_USERNAME")!;
+    public static string ChannelUsername = Environment.GetEnvironmentVariable("CHANNEL_USERNAME")!;
+    public static long AdminChatId = long.Parse(Environment.GetEnvironmentVariable("ADMIN_CHAT_ID")!);
+
     public static PaymentService PaymentService { get; set; } = default!;
 }
+

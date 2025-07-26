@@ -110,6 +110,7 @@ _ReSharper*/
 # Local runtime data
 data/payments.json
 data/pending.json
+data/post_count.json
 
 # Ignore compiled templates or temp posts
 data/*.cache

@@ -24,6 +24,7 @@ public static class PostPublisher
 
     public static async Task<int> PublishPostAsync(ITelegramBotClient botClient, PostData post, long chatId, bool isAdmin, CancellationToken cancellationToken)
     {
+
         var caption = CaptionBuilder.Build(post, isAdmin, BotUsername);
         var imageUrl = post.ImageUrl ?? "https://via.placeholder.com/300";
 

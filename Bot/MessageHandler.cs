@@ -31,11 +31,18 @@ namespace Bot
             }
             else if (text == "📤 Опублікувати оголошення")
             {
+                var current = PostCounter.GetCurrentCount();
+                var remaining = 100 - current;
+
                 await botClient.SendTextMessageAsync(chatId,
-                    "🔗 Скопіюй посилання на оголошення з OLX вручну та встав його сюди в поле вводу.\n\n" +
-                    "⚠️ Якщо ти поділишся оголошенням через кнопку «Поділитися» та вибереш цього бота — посилання може бути неповним, і бот не зможе його обробити.",
+                    $"🔗 Надішли посилання на оголошення з OLX:\n\n" +
+                    $"📊 Сьогодні вже опубліковано: <b>{current}</b>/100\n" +
+                    $"🕐 Залишилось місць: <b>{remaining}</b>\n\n" +
+                    $"‼️ Встав саме <u>посилання</u> вручну в поле вводу, а не ділись ним через “Поділитися” — бот не зможе його розпізнати.",
+                    parseMode: ParseMode.Html,
                     cancellationToken: cancellationToken);
             }
+
 
             else if (text == "📢 Перейти на канал")
             {

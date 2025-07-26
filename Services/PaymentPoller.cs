@@ -28,8 +28,61 @@ public class PaymentPoller
         _token = token;
     }
 
+    private async Task TryPublishPostAsync(PaymentRequest payment)
+    {
+        if (!PostCounter.TryIncrement())
+        {
+            await _bot.SendTextMessageAsync(
+                chatId: payment.ChatId,
+                text: "⛔ Ліміт публікацій на сьогодні вичерпано. Спробуй завтра.",
+                replyMarkup: KeyboardFactory.MainButtons(),
+                cancellationToken: _token
+            );
+            return;
+        }
+
+        var messageId = await PostPublisher.PublishPostAsync(
+            _bot,
+            payment.Post!,
+            payment.ChatId,
+            isAdmin: false,
+            cancellationToken: _token);
+
+        payment.Post.ChannelMessageId = messageId;
+        payment.Post.PublishedAt = DateTime.UtcNow;
+
+        ConfirmedPayments.Add(payment);
+        ConfirmedPayments.Save();
+
+        await _bot.SendTextMessageAsync(
+            chatId: payment.ChatId,
+            text: "✅ Оголошення опубліковане в канал!",
+            replyMarkup: KeyboardFactory.MainButtons(),
+            cancellationToken: _token
+        );
+    }
+
     public async Task RunAsync()
     {
+        // 🟡 КРОК 1: Опрацювати збережені, але не опубліковані пости
+        var unpaidPosts = ConfirmedPayments.GetAll()
+            .Where(p => p.Post != null && p.Post.ChannelMessageId == null)
+            .ToList();
+
+        foreach (var payment in unpaidPosts)
+        {
+            try
+            {
+                await TryPublishPostAsync(payment);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Помилка при повторній публікації: {ex.Message}");
+            }
+        }
+
+
+        // 🟢 КРОК 2: Перевірка нових оплат 
         while (!_token.IsCancellationRequested)
         {
             var confirmed = await _paymentService.CheckPaymentsAsync();
@@ -42,75 +95,24 @@ public class PaymentPoller
                     continue;
                 }
 
-                // Перевірка, чи вже опубліковано
                 if (payment.Post.ChannelMessageId != null)
                 {
                     Console.WriteLine($"ℹ️ Оголошення вже опубліковано (MessageId: {payment.Post.ChannelMessageId})");
                     continue;
                 }
+
                 try
                 {
-                    var messageId = await PostPublisher.PublishPostAsync(
-                        _bot,
-                        payment.Post,
-                        payment.ChatId,
-                        isAdmin: false,
-                        cancellationToken: _token);
-
-                    payment.Post.ChannelMessageId = messageId;
-                    payment.Post.PublishedAt = DateTime.UtcNow;
-
-                    ConfirmedPayments.Add(payment);
-                    ConfirmedPayments.Save(); // на всяк випадок
-
-                    await _bot.SendTextMessageAsync(
-                        chatId: payment.ChatId,
-                        text: "✅ Оголошення опубліковане в канал!",
-                        replyMarkup: KeyboardFactory.MainButtons(),
-                        cancellationToken: _token
-                    );
-
-                    Console.WriteLine($"📢 Опубліковано оголошення для чату {payment.ChatId} (msgId: {messageId})");
+                    await TryPublishPostAsync(payment);
                 }
-
-                //try
-                //{
-                //    var caption = CaptionBuilder.Build(payment.Post, true, BotUsername);
-
-                //    var sentMessage = await _bot.SendPhotoAsync(
-                //        chatId: ChannelUsername,
-                //        photo: InputFile.FromUri(payment.Post.ImageUrl ?? "https://via.placeholder.com/300"),
-                //        caption: caption,
-                //        parseMode: ParseMode.Html,
-                //        cancellationToken: _token
-                //    );
-
-                //    payment.Post.ChannelMessageId = sentMessage.MessageId;
-                //    payment.Post.PublishedAt = DateTime.UtcNow;
-
-                //    ConfirmedPayments.Add(payment);
-
-                //    await _bot.SendTextMessageAsync(
-                //        chatId: payment.ChatId,
-                //        text: "✅ Оголошення опубліковане в канал!",
-                //        replyMarkup: KeyboardFactory.MainButtons(),
-                //        cancellationToken: _token
-                //    );
-
-                //    Console.WriteLine($"📢 Опубліковано оголошення для чату {payment.ChatId} (msgId: {sentMessage.MessageId})");
-                //}
                 catch (Exception ex)
                 {
-                    await _bot.SendTextMessageAsync(
-                        chatId: payment.ChatId,
-                        text: $"⚠️ Помилка при публікації: {ex.Message}",
-                        cancellationToken: _token
-                    );
-                    Console.WriteLine($"❌ Помилка публікації для {payment.ChatId}: {ex.Message}");
+                    Console.WriteLine($"❌ Помилка при публікації: {ex.Message}");
                 }
             }
 
             await Task.Delay(TimeSpan.FromMinutes(1), _token);
         }
     }
+
 }

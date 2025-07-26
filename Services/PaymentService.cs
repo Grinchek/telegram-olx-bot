@@ -1,10 +1,8 @@
-﻿using Models;
+﻿//Services/PaymentService.cs
+using Models;
 using Storage;
-using System.Collections.Generic;
-using System;
-using System.Net.Http.Json;
 using System.Text.Json;
-using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 
 namespace Services;
 
@@ -23,94 +21,99 @@ public class PaymentService
         _http.DefaultRequestHeaders.Add("X-Token", _token);
     }
 
-    // Генерує унікальний 5-значний код
     public string GeneratePaymentCode(long chatId, PostData? post = null)
     {
         var code = new Random().Next(10000, 99999).ToString();
 
-        var request = new PaymentRequest
+        PendingPayments.Add(new PaymentRequest
         {
             ChatId = chatId,
             Code = code,
             Post = post
-        };
+        });
 
-        PendingPayments.Add(request);
         return code;
     }
 
     public async Task<List<PaymentRequest>> CheckPaymentsAsync()
     {
+        var transactions = await GetRecentTransactionsAsync();
+        var confirmed = new List<PaymentRequest>();
 
+        foreach (var transaction in transactions)
+        {
+            if (!IsRelevant(transaction)) continue;
+
+            var code = ExtractCode(transaction.comment!);
+            if (code is null) continue;
+
+            if (PendingPayments.TryGet(code, out var request))
+            {
+                request.TransactionId = transaction.id;
+                confirmed.Add(request);
+                PendingPayments.Remove(code);
+                Console.WriteLine($"✅ Підтверджено оплату по коду: {code}");
+            }
+        }
+
+        Console.WriteLine($"🔎 Перевірено {transactions.Count} транзакцій. Підтверджено: {confirmed.Count}");
+        await SaveConfirmedPaymentsAsync(confirmed);
+        return confirmed;
+    }
+
+    private async Task<List<MonobankTransaction>> GetRecentTransactionsAsync()
+    {
         var from = DateTimeOffset.UtcNow.AddHours(-24).ToUnixTimeSeconds();
         var to = DateTimeOffset.UtcNow.AddSeconds(-60).ToUnixTimeSeconds();
-
         var accountId = Environment.GetEnvironmentVariable("MONOBANK_ACCOUNT_ID") ?? "";
-        // ID банки
+
         var response = await _http.GetAsync($"personal/statement/{accountId}/{from}/{to}");
 
         if (!response.IsSuccessStatusCode)
-            return new List<PaymentRequest>(); // або логування
+            return [];
 
-        var json = await response.Content.ReadAsStringAsync();
-        var transactions = JsonSerializer.Deserialize<List<MonobankTransaction>>(json)!;
+        var jsonContent = await response.Content.ReadAsStringAsync();
+        var transactions = JsonSerializer.Deserialize<List<MonobankTransaction>>(jsonContent)!;
+
         foreach (var tx in transactions)
         {
             Console.WriteLine($"TX: {tx.amount / 100.0} грн, currency: {tx.currencyCode}, comment: '{tx.comment}', time: {tx.time}, id: {tx.id}");
         }
 
-        var confirmed = new List<PaymentRequest>();
+        return transactions;
+    }
 
-        foreach (var tx in transactions)
-        {
-            if (tx.amount < 1000 || tx.currencyCode != 980 || string.IsNullOrWhiteSpace(tx.comment))
-                continue;
+    private static bool IsRelevant(MonobankTransaction tx) =>
+        tx.amount >= 1500 && tx.currencyCode == 980 && !string.IsNullOrWhiteSpace(tx.comment);
 
-            var codeMatch = System.Text.RegularExpressions.Regex.Match(tx.comment ?? "", @"(?<!\d)\d{5,6}(?!\d)");
+    private static string? ExtractCode(string comment)
+    {
+        var match = Regex.Match(comment, @"(?<!\d)\d{5,6}(?!\d)");
+        return match.Success ? match.Value : null;
+    }
 
-
-            if (codeMatch.Success)
-            {
-                var code = codeMatch.Value;
-
-                if (PendingPayments.TryGet(code, out var request))
-                {
-                    request.TransactionId = tx.id;
-                    confirmed.Add(request);
-                    PendingPayments.Remove(code);
-                    Console.WriteLine($"✅ Підтверджено оплату по коду: {code}");
-                }
-            }
-        }
-
-        Console.WriteLine($"🔎 Перевірено {transactions.Count} транзакцій. Підтверджено: {confirmed.Count}");
-
-        // === НОВА ЛОГІКА ===
-
+    private static async Task SaveConfirmedPaymentsAsync(List<PaymentRequest> confirmed)
+    {
         const string filePath = "data/payments.json";
-
-        // 1. Прочитай історію з файлу, якщо є
         List<PaymentRequest> history = [];
 
         if (File.Exists(filePath))
         {
             try
             {
-                var jsonHistory = await File.ReadAllTextAsync(filePath);
-                var loaded = JsonSerializer.Deserialize<List<PaymentRequest>>(jsonHistory);
+                var json = await File.ReadAllTextAsync(filePath);
+                var loaded = JsonSerializer.Deserialize<List<PaymentRequest>>(json);
                 if (loaded is not null)
                     history = loaded;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️ Не вдалося прочитати payments.json: {ex.Message}");
+                Console.WriteLine($"⚠️ Не вдалося прочитати файл: {ex.Message}");
             }
         }
 
-        // 2. Додай нові підтвердження до історії
         history.AddRange(confirmed);
 
-        // 3. Запиши в файл оновлену історію
         try
         {
             var jsonOutput = JsonSerializer.Serialize(history, new JsonSerializerOptions { WriteIndented = true });
@@ -119,14 +122,10 @@ public class PaymentService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️ Не вдалося записати у payments.json: {ex.Message}");
+            Console.WriteLine($"⚠️ Не вдалося записати у файл: {ex.Message}");
         }
-
-        return confirmed;
-
     }
 
-    // Внутрішня модель Monobank
     private class MonobankTransaction
     {
         public string id { get; set; } = default!;
@@ -135,12 +134,5 @@ public class PaymentService
         public int currencyCode { get; set; }
         public string? comment { get; set; }
     }
-
-    // Тимчасово не використовується
-    //public async Task ListAccountsAsync()
-    //{
-    //    var response = await _http.GetAsync("personal/client-info");
-    //    var json = await response.Content.ReadAsStringAsync();
-    //    Console.WriteLine(json);
-    //}
 }
+

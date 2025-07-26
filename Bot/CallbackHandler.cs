@@ -51,7 +51,6 @@ namespace Bot
                         TransactionId = null
                     };
 
-                    ConfirmedPayments.Add(request);
                     InMemoryRepository.PendingPosts.TryRemove(chatId, out _);
 
                     await botClient.EditMessageReplyMarkupAsync(chatId, callback.Message.MessageId, null, cancellationToken);
