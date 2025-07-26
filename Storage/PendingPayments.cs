@@ -10,8 +10,6 @@ public static class PendingPayments
 {
     private static readonly string FilePath = "data/payments.json";
     private static readonly object LockObj = new();
-
-    // ќсь ц€ зм≥нна була в≥дсутн€
     private static readonly Dictionary<string, PaymentRequest> _pending = new();
 
     static PendingPayments()
