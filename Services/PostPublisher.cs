@@ -43,7 +43,16 @@ public static class PostPublisher
         };
 
         // Додаємо до ConfirmedPayments
+        List < PaymentRequest > Confirmed= ConfirmedPayments.GetAll();
+        foreach (var item in Confirmed)
+        {
+           if(item.Post.ChannelMessageId == request.Post.ChannelMessageId)
+            {
+                
+            }
+        }
         ConfirmedPayments.Add(request);
+
 
         // Формуємо кнопку
         var markup = new InlineKeyboardMarkup(new[]
@@ -63,6 +72,7 @@ public static class PostPublisher
         post.ChannelMessageId = message.MessageId;
 
         // Зберігаємо оновлене повідомлення в ConfirmedPayments (опціонально)
+        ConfirmedPayments.RemoveDuplicatesByChannelMessageId();
         ConfirmedPayments.Save();
 
         return message.MessageId;

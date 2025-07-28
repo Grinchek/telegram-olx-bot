@@ -30,9 +30,11 @@ public static class KeyboardFactory
 
     public static InlineKeyboardMarkup DeleteButton(long ownerId, int messageId)
     {
+        
         return new InlineKeyboardMarkup(new[]
         {
-            InlineKeyboardButton.WithCallbackData("🗑 Видалити", $"delete:{ownerId}:{messageId}")
-        });
+            
+            InlineKeyboardButton.WithCallbackData("🗑 Видалити", $"delete_post_:{ownerId}:{messageId}")
+        }); 
     }
 }

@@ -109,7 +109,7 @@ namespace Bot
                         chatId: "@baraholka_market_ua",
                         messageId: postToRemove.Post!.ChannelMessageId!.Value,
                         cancellationToken: cancellationToken);
-
+                    ConfirmedPayments.RemoveDuplicatesByChannelMessageId();
                     all.Remove(postToRemove);
                     ConfirmedPayments.Save();
 

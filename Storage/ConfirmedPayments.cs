@@ -32,6 +32,18 @@ public static class ConfirmedPayments
         if (loaded != null)
             Confirmed.AddRange(loaded);
     }
+    public static void RemoveDuplicatesByChannelMessageId()
+    {
+        var seen = new HashSet<int>();
+        Confirmed.RemoveAll(p =>
+        {
+            if (p.Post?.ChannelMessageId == null) return false;
+            return !seen.Add(p.Post.ChannelMessageId.Value);
+        });
+
+        Save();
+    }
+
 
     public static List<PaymentRequest> GetAll() => Confirmed;
 }
