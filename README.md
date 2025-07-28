@@ -36,6 +36,7 @@ CHANNEL_USERNAME=@your_channel_username
 BOT_USERNAME=@your_bot_username
 ADMIN_CHAT_ID=123456789
 MONO_JAR_URL=https://send.monobank.ua/jar/your_jar_id
+MONOBANK_ACCOUNT_ID=Account id of the jar
 ❗ Не публікуй цей файл у відкритий доступ!
 3. Встановити залежності та запустити
 bash:
