@@ -1,0 +1,124 @@
+#########################
+# ENVIRONMENT VARIABLES #
+#########################
+
+.env
+.env.*
+
+####################
+# BUILD ARTIFACTS  #
+####################
+
+bin/
+obj/
+out/
+*.dll
+*.exe
+*.app
+*.log
+*.tmp
+*.pid
+*.cache
+*.db
+*.sqlite
+*.pdb
+
+####################
+# USER DATA & LOGS #
+####################
+
+*.log
+*.bak
+*.swp
+*.swo
+*.user
+*.vspscc
+*.vssscc
+*.vsp
+*.psess
+*.suo
+*.userosscache
+*.sln.docstates
+
+###############
+# SYSTEM FILES #
+###############
+
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+Desktop.ini
+
+####################
+# IDE CONFIG FILES #
+####################
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+
+# Rider
+.idea/
+
+# VS Code
+.vscode/
+.history/
+
+#####################
+# DOTNET SPECIFIC   #
+#####################
+
+project.lock.json
+project.fragment.lock.json
+artifacts/
+*.csproj.user
+
+##########################
+# TEST / COVERAGE OUTPUT #
+##########################
+
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+*.testsettings
+*.runsettings
+
+##########################
+# TOOL-SPECIFIC          #
+##########################
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# JetBrains Rider
+.idea/
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+##########################
+# CUSTOM PROJECT FILES   #
+##########################
+
+# Local runtime data
+data/payments.json
+data/pending.json
+data/post_count.json
+
+# Ignore compiled templates or temp posts
+data/*.cache
+data/*.txt
+
+##########################
+# OTHER FILES TO IGNORE  #
+##########################
+
+*.old
+*.orig
