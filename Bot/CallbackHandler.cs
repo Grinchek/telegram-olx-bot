@@ -36,20 +36,25 @@ public class CallbackHandler
         _adminChatId = long.Parse(Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? "0");
     }
 
+    
     public async Task HandleCallbackAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
     {
         var callback = update.CallbackQuery;
         if (callback == null) return;
 
-        var chatId = callback.Message.Chat.Id;
+        var chatId = callback.Message?.Chat.Id ?? 0;
+        var messageId = callback.Message?.MessageId;
+        var inlineMessageId = callback.InlineMessageId;
 
         if (callback.Data == "confirm_publish")
         {
             var pending = await _pendingPaymentsService.GetLastByChatIdAsync(chatId);
-
             if (pending == null || pending.Post == null)
             {
-                await botClient.AnswerCallbackQueryAsync(callback.Id, "⛔ Немає оголошення для публікації.", cancellationToken: cancellationToken);
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: "⛔ Немає оголошення для публікації.",
+                    cancellationToken: cancellationToken);
                 return;
             }
 
@@ -58,11 +63,11 @@ public class CallbackHandler
 
             if (isAdmin)
             {
-                var messageId = await _postPublisher.PublishPostAsync(post, chatId, true, cancellationToken);
+                var publishedMsgId = await _postPublisher.PublishPostAsync(post, chatId, true, cancellationToken);
                 post.PublishedAt = DateTime.UtcNow;
-                post.ChannelMessageId = messageId;
+                post.ChannelMessageId = publishedMsgId;
 
-                var request = new ConfirmedPayment
+                var confirmed = new ConfirmedPayment
                 {
                     ChatId = chatId,
                     Code = "FREE",
@@ -71,96 +76,143 @@ public class CallbackHandler
                     TransactionId = null
                 };
 
-                await _confirmedPaymentsService.AddAsync(request);
+                await _confirmedPaymentsService.AddAsync(confirmed);
                 await _pendingPaymentsService.RemoveAsync(pending);
 
-                await botClient.EditMessageReplyMarkupAsync(chatId, callback.Message.MessageId, null, cancellationToken);
-                await botClient.SendTextMessageAsync(chatId, "✅ Оголошення опубліковано безкоштовно (адмін).", cancellationToken: cancellationToken);
+                if (messageId.HasValue)
+                {
+                    await botClient.EditMessageReplyMarkupAsync(
+                        chatId: chatId,
+                        messageId: messageId.Value,
+                        replyMarkup: null,
+                        cancellationToken: cancellationToken);
+                }
+
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: "✅ Оголошення опубліковано безкоштовно (адмін).",
+                    cancellationToken: cancellationToken);
             }
             else
             {
                 var code = await Program.PaymentService.GeneratePaymentCode(chatId, post);
 
-                await botClient.EditMessageReplyMarkupAsync(chatId, callback.Message.MessageId, null, cancellationToken);
+                if (messageId.HasValue)
+                {
+                    await botClient.EditMessageReplyMarkupAsync(
+                        chatId: chatId,
+                        messageId: messageId.Value,
+                        replyMarkup: null,
+                        cancellationToken: cancellationToken);
+                }
 
-                await botClient.SendTextMessageAsync(chatId,
+                var text =
                     $"💳 Щоб опублікувати оголошення, сплати 15 грн на банку:\n" +
                     $"👉 <a href=\"{_jarUrl}\">Натисни тут</a>\n\n" +
                     $"📝 У коментарі до платежу введи цей код: <code>{code}</code>\n\n" +
-                    $"⏱ Після сплати бот автоматично перевірить оплату та опублікує оголошення впродовж 1–5 хвилин.",
+                    $"⏱ Після сплати бот автоматично перевірить оплату та опублікує оголошення впродовж 1–5 хвилин.\n" +
+                    $"⏱ Оголошення на каналі автоматично видалиться через 3 дні";
+
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: text,
                     parseMode: ParseMode.Html,
+                    replyMarkup: KeyboardFactory.MainButtons(),
                     cancellationToken: cancellationToken);
             }
         }
         else if (callback.Data == "cancel")
         {
             var pending = await _pendingPaymentsService.GetLastByChatIdAsync(chatId);
+
             if (pending != null)
+            {
                 await _pendingPaymentsService.RemoveAsync(pending);
                 await _postDraftSeevice.RemoveByChatIdAsync(pending.ChatId);
+            }
 
-            await botClient.EditMessageReplyMarkupAsync(chatId, callback.Message.MessageId, null, cancellationToken);
-            await botClient.SendTextMessageAsync(chatId, "❌ Публікацію скасовано.", replyMarkup: KeyboardFactory.MainButtons(), cancellationToken: cancellationToken);
+            if (messageId.HasValue)
+            {
+                await botClient.EditMessageReplyMarkupAsync(
+                    chatId: chatId,
+                    messageId: messageId.Value,
+                    replyMarkup: null,
+                    cancellationToken: cancellationToken);
+            }
+
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "❌ Публікацію скасовано.",
+                replyMarkup: KeyboardFactory.MainButtons(),
+                cancellationToken: cancellationToken);
         }
         else if (callback.Data.StartsWith("delete_post_msg_"))
         {
             var msgIdRaw = callback.Data.Replace("delete_post_msg_", "");
-
-            if (!int.TryParse(msgIdRaw, out int msgId))
+            if (!int.TryParse(msgIdRaw, out int msgIdToDelete))
             {
-                await botClient.AnswerCallbackQueryAsync(callback.Id, "⚠️ Некоректний формат ID.");
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: "⚠️ Некоректний формат ID.",
+                    cancellationToken: cancellationToken);
                 return;
             }
 
-            // Отримуємо конкретний ConfirmedPayment з AsNoTracking, щоб уникнути проблем EF
-            var postToRemove = await _confirmedPaymentsService.GetByChannelMessageIdAsync(msgId);
-
+            var postToRemove = await _confirmedPaymentsService.GetByChannelMessageIdAsync(msgIdToDelete);
             if (postToRemove == null)
             {
-                await botClient.AnswerCallbackQueryAsync(callback.Id, "⚠️ Оголошення не знайдено.");
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: "⚠️ Оголошення не знайдено.",
+                    cancellationToken: cancellationToken);
                 return;
             }
 
             bool isOwner = callback.From.Id == postToRemove.ChatId;
             bool isAdmin = callback.From.Id == _adminChatId;
-
             if (!isOwner && !isAdmin)
             {
-                await botClient.AnswerCallbackQueryAsync(callback.Id, "⛔ Ви можете видалити лише свої оголошення.");
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: "⛔ Ви можете видалити лише свої оголошення.",
+                    cancellationToken: cancellationToken);
                 return;
             }
 
             try
             {
-                // Видаляємо повідомлення з каналу
+                var channel = new ChatId("@baraholka_market_ua");
                 await botClient.DeleteMessageAsync(
-                    chatId: "@baraholka_market_ua",
-                    messageId: msgId,
+                    chatId: channel,
+                    messageId: msgIdToDelete,
                     cancellationToken: cancellationToken);
 
-                // Видаляємо з таблиці confirmed_payments
                 await _confirmedPaymentsService.RemoveAsync(postToRemove);
-                // Видаляємо чернетку з таблиці post
-                var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgId);
+                var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgIdToDelete);
                 if (affected == 0)
                 {
                     await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
                 }
 
-                await botClient.AnswerCallbackQueryAsync(callback.Id, "✅ Оголошення видалено.");
-
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: "✅ Оголошення видалено.",
+                    cancellationToken: cancellationToken);
             }
-
             catch (Exception ex)
             {
-                // Обрізаємо повідомлення помилки до 180 символів, щоб уникнути MESSAGE_TOO_LONG
                 var shortError = ex.Message.Length > 180 ? ex.Message[..180] + "..." : ex.Message;
-                await botClient.AnswerCallbackQueryAsync(callback.Id, $"❌ Помилка: {shortError}");
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: $"❌ Помилка: {shortError}",
+                    cancellationToken: cancellationToken);
             }
-
         }
-
-
-
     }
+
+
+
+
+
 }
+
