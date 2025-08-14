@@ -10,15 +10,18 @@ using Services.Interfaces;
 public class AutoCleanupService
 {
     private readonly IConfirmedPaymentsService _confirmedPaymentsService;
+    private readonly IPostDraftService _postDraftSeevice;
     private readonly ITelegramBotClient _botClient;
     private readonly CancellationToken _cancellationToken;
 
     public AutoCleanupService(
         IConfirmedPaymentsService confirmedPaymentsService,
+        IPostDraftService postDraftService,
         ITelegramBotClient botClient,
         CancellationToken cancellationToken)
     {
         _confirmedPaymentsService = confirmedPaymentsService;
+        _postDraftSeevice = postDraftService;
         _botClient = botClient;
         _cancellationToken = cancellationToken;
     }
@@ -49,6 +52,7 @@ public class AutoCleanupService
                                 cancellationToken: _cancellationToken);
 
                             await _confirmedPaymentsService.RemoveAsync(payment);
+                            await _postDraftSeevice.RemoveByPostIdAsync(payment.PostId);
 
                             Console.WriteLine($"🧹 Видалено пост ID={payment.Id}, вік: {age.TotalDays:F1} днів");
                         }

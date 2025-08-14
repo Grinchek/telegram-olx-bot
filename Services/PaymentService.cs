@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Text;
 using Data.Entities;
 using Services.Interfaces;
 using System.Net.Http;
@@ -12,24 +13,29 @@ using Services;
 using Data;
 using Microsoft.EntityFrameworkCore;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Configuration;
 
 public class PaymentService
 {
     private readonly string _monoToken;
+    private readonly string _monoAccountId; // <-- ДОДАЛИ
     private readonly IPendingPaymentsService _pendingPaymentsService;
     private readonly IConfirmedPaymentsService _confirmedPaymentsService;
     private readonly BotDbContext _context;
 
     public PaymentService(
         BotDbContext context,
-        string monoToken,
+        IConfiguration cfg, // <-- ЗАМІНИЛИ string monoToken на IConfiguration
         IPendingPaymentsService pendingPaymentsService,
         IConfirmedPaymentsService confirmedPaymentsService)
     {
         _context = context;
-        _monoToken = monoToken;
         _pendingPaymentsService = pendingPaymentsService;
         _confirmedPaymentsService = confirmedPaymentsService;
+
+        _monoToken = cfg["MONOBANK_TOKEN"]
+            ?? throw new InvalidOperationException("MONOBANK_TOKEN is not set");
+        _monoAccountId = cfg["MONOBANK_ACCOUNT_ID"] ?? "0"; 
     }
 
     // Генерація унікального коду
@@ -67,42 +73,73 @@ public class PaymentService
 
 
     // Отримання нових оплат, які відповідають очікуваним
+  
     public async Task<List<PendingPayment>> GetNewPaymentsAsync()
     {
+        Console.WriteLine("Початок пошуку нових оплат...");
         var pendingPayments = await _pendingPaymentsService.GetAllAsync();
         var newTransactions = await GetRecentTransactionsAsync();
-
+        
         var matches = new List<PendingPayment>();
 
-        //temp
         var usedTxIds = await _context.ConfirmedPayments
             .Select(x => x.TransactionId)
             .ToListAsync();
 
         var pickedTxIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        const int CURRENCY_UAH = 980;
+        const int MIN_AMOUNT_KOP = 1500; // 15.00 грн
+
+        
 
         foreach (var payment in pendingPayments)
         {
-            var code = payment.Code.ToUpperInvariant();
-            var regex = new Regex(@"\b" + Regex.Escape(code) + @"\b", RegexOptions.IgnoreCase);
+            if (string.IsNullOrWhiteSpace(payment.Code))
+                continue;
 
+            var code = payment.Code.Trim();
+
+
+            static bool CommentContainsCode(string? comment, string code)
+            {
+                if (string.IsNullOrWhiteSpace(comment) || string.IsNullOrWhiteSpace(code))
+                    return false;
+
+                var c = comment.Normalize(NormalizationForm.FormKC);
+                var k = code.Normalize(NormalizationForm.FormKC);
+
+                return c.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            ///////////////////////////////
+            foreach (var t in newTransactions)
+            {
+                var hasCode = CommentContainsCode(t.comment, code);
+                var rightCur = t.currencyCode == CURRENCY_UAH;
+                var enough = t.amount >= MIN_AMOUNT_KOP && t.amount > 0;
+                if (hasCode)
+                    Console.WriteLine($"tx {t.id}: hasCode={hasCode}, curr={t.currencyCode}, amount={t.amount}");
+            }
             var matchTx = newTransactions.FirstOrDefault(t =>
-                t.comment != null
-                && regex.IsMatch(t.comment)
+                CommentContainsCode(t.comment, code)    
+                && t.currencyCode == CURRENCY_UAH   
+                && t.amount >= MIN_AMOUNT_KOP
+                && t.amount > 0
                 && !usedTxIds.Contains(t.id)
-                && !pickedTxIds.Contains(t.id));
+                && !pickedTxIds.Contains(t.id)
+            );
 
             if (matchTx != null)
             {
                 payment.TransactionId = matchTx.id;
-                pickedTxIds.Add(matchTx.id);     // <- не дамо цю транзакцію використати вдруге в цьому ж проході
+                pickedTxIds.Add(matchTx.id);
                 matches.Add(payment);
             }
         }
-
+      
         return matches;
     }
+
 
     // Отримати останні 100 транзакцій із Монобанку
     private async Task<List<MonobankTransaction>> GetRecentTransactionsAsync()
@@ -111,13 +148,16 @@ public class PaymentService
         client.DefaultRequestHeaders.Add("X-Token", _monoToken);
 
         var from = DateTimeOffset.UtcNow.AddDays(-2).ToUnixTimeSeconds();
-        var url = $"https://api.monobank.ua/personal/statement/0/{from}";
+
+        var url = $"https://api.monobank.ua/personal/statement/{_monoAccountId}/{from}";
 
         var response = await client.GetAsync(url);
         response.EnsureSuccessStatusCode();
 
         var json = await response.Content.ReadAsStringAsync();
-        return JsonSerializer.Deserialize<List<MonobankTransaction>>(json) ?? new();
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        return JsonSerializer.Deserialize<List<MonobankTransaction>>(json, options) ?? new();
     }
 }
 
@@ -125,4 +165,7 @@ public class MonobankTransaction
 {
     public string id { get; set; }
     public string? comment { get; set; }
+    public long amount { get; set; }     
+    public int currencyCode { get; set; }
 }
+

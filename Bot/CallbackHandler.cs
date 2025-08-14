@@ -15,7 +15,7 @@ public class CallbackHandler
 {
     private readonly IConfirmedPaymentsService _confirmedPaymentsService;
     private readonly IPendingPaymentsService _pendingPaymentsService;
-    private readonly IPostDraftService _posrDraftSeevice;
+    private readonly IPostDraftService _postDraftSeevice;
     private readonly string _jarUrl;
     private readonly long _adminChatId;
     private readonly PostPublisher _postPublisher;
@@ -25,13 +25,13 @@ public class CallbackHandler
     public CallbackHandler(
         IConfirmedPaymentsService confirmedPaymentsService,
         IPendingPaymentsService pendingPaymentsService,
-        IPostDraftService posrDraftSeevice,
+        IPostDraftService postDraftSeevice,
         PostPublisher postPublisher)
     {
         _postPublisher = postPublisher;
         _confirmedPaymentsService = confirmedPaymentsService;
         _pendingPaymentsService = pendingPaymentsService;
-        _posrDraftSeevice = posrDraftSeevice;
+        _postDraftSeevice = postDraftSeevice;
         _jarUrl = Environment.GetEnvironmentVariable("MONO_JAR_URL") ?? "";
         _adminChatId = long.Parse(Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? "0");
     }
@@ -97,7 +97,7 @@ public class CallbackHandler
             var pending = await _pendingPaymentsService.GetLastByChatIdAsync(chatId);
             if (pending != null)
                 await _pendingPaymentsService.RemoveAsync(pending);
-                await _posrDraftSeevice.RemoveByChatIdAsync(pending.ChatId);
+                await _postDraftSeevice.RemoveByChatIdAsync(pending.ChatId);
 
             await botClient.EditMessageReplyMarkupAsync(chatId, callback.Message.MessageId, null, cancellationToken);
             await botClient.SendTextMessageAsync(chatId, "❌ Публікацію скасовано.", replyMarkup: KeyboardFactory.MainButtons(), cancellationToken: cancellationToken);
@@ -141,10 +141,10 @@ public class CallbackHandler
                 // Видаляємо з таблиці confirmed_payments
                 await _confirmedPaymentsService.RemoveAsync(postToRemove);
                 // Видаляємо чернетку з таблиці post
-                var affected = await _posrDraftSeevice.RemoveByChannelMessageIdAsync(msgId);
+                var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgId);
                 if (affected == 0)
                 {
-                    await _posrDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
+                    await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
                 }
 
                 await botClient.AnswerCallbackQueryAsync(callback.Id, "✅ Оголошення видалено.");

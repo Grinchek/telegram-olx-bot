@@ -6,6 +6,7 @@ using DotNetEnv;
 using Microsoft.EntityFrameworkCore;
 using Data;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 
 public partial class Program
 {
@@ -29,7 +30,9 @@ public partial class Program
             Console.WriteLine("🔧 EF Tools context detected. Skipping bot startup.");
             return;
         }
-
+        var config = new ConfigurationBuilder()
+            .AddEnvironmentVariables()
+            .Build();
         var cancellationToken = new CancellationTokenSource().Token;
 
         var services = new ServiceCollection();
@@ -40,6 +43,8 @@ public partial class Program
 
         // TelegramBotClient — можна залишити Singleton
         services.AddSingleton<ITelegramBotClient>(new TelegramBotClient(botToken));
+        // 2) Зареєструвати IConfiguration
+        services.AddSingleton<IConfiguration>(config);
 
         // DbContext — Scoped
         services.AddDbContext<BotDbContext>(options =>
@@ -57,7 +62,8 @@ public partial class Program
             var pending = provider.GetRequiredService<IPendingPaymentsService>();
             var confirmed = provider.GetRequiredService<IConfirmedPaymentsService>();
             var context = provider.GetRequiredService<BotDbContext>();
-            return new PaymentService( context,monobankToken, pending, confirmed);
+            var cfg = provider.GetRequiredService<IConfiguration>();
+            return new PaymentService(context, cfg, pending, confirmed);
         });
 
         // Інші Scoped класи
@@ -84,7 +90,13 @@ public partial class Program
             return new PaymentPoller(paymentService, bot, cancellationToken, draft, postPublisher,postCounter);
         });
 
-        services.AddScoped<AutoCleanupService>();
+        services.AddScoped<AutoCleanupService>(provider =>
+        {
+            var confirmed = provider.GetRequiredService<IConfirmedPaymentsService>();
+            var draft = provider.GetRequiredService<IPostDraftService>();
+            var bot = provider.GetRequiredService<ITelegramBotClient>();
+            return new AutoCleanupService(confirmed, draft, bot, cancellationToken);
+        });
 
         var provider = services.BuildServiceProvider();
 
@@ -118,12 +130,18 @@ public partial class Program
             // Автоочищення неоплачених публікацій(інтервал - 1 година)
             _ = Task.Run(async () =>
             {
+
                 using var s = provider.CreateScope();
                 var cleanup = s.ServiceProvider.GetRequiredService<PendingCleanupService>();
                 await cleanup.RunAsync();
             }, cancellationToken);
-
-
+            //Автоочищення старих платежів
+            _ = Task.Run(async () =>
+            {
+                using var s = provider.CreateScope();
+                var cleanOld= s.ServiceProvider.GetRequiredService<AutoCleanupService>();
+                await cleanOld.RunAsync();
+            }, cancellationToken);
 
             // Запуск бота
             var botClient = scopedProvider.GetRequiredService<ITelegramBotClient>();
