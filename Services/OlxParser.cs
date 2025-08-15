@@ -83,7 +83,8 @@ namespace Services
                 Title = Clean(title),
                 Price = price,
                 Description = description,
-                ImageUrl = string.IsNullOrWhiteSpace(imageUrl) ? null : imageUrl
+                ImageUrl = string.IsNullOrWhiteSpace(imageUrl) ? null : imageUrl,
+                SourceUrl = url,
             };
         }
 

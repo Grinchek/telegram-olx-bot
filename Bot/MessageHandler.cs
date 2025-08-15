@@ -96,7 +96,6 @@ namespace Bot
                 try
                 {
                     var postData = await OlxParser.ParseOlxAsync(olxUrl!);
-
                     // Зберігаємо в чернетки
                     await _postDraftService.SaveDraftAsync(chatId, postData);
 
