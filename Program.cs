@@ -7,12 +7,14 @@ using Microsoft.EntityFrameworkCore;
 using Data;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
+using System;
 
 public partial class Program
 {
-    public static string BotUsername = Environment.GetEnvironmentVariable("BOT_USERNAME")!;
-    public static string ChannelUsername = Environment.GetEnvironmentVariable("CHANNEL_USERNAME")!;
-    public static long AdminChatId = long.Parse(Environment.GetEnvironmentVariable("ADMIN_CHAT_ID")!);
+    // Будуть ініціалізовані в Main після Env.Load()
+    public static string BotUsername { get; private set; } = string.Empty;
+    public static string ChannelUsername { get; private set; } = string.Empty; // Єдине джерело правди
+    public static long AdminChatId { get; private set; }
 
     public static PaymentService PaymentService { get; set; } = default!;
     public static IPostDraftService PostDraftService { get; set; } = default!;
@@ -21,29 +23,45 @@ public partial class Program
 
     public static async Task Main(string[] args)
     {
+        // Вихід для EF tools
         if (args.Contains("ef")) return;
 
-        Env.Load();
+        Env.Load(); // Підхоплюємо .env ДО читання змінних середовища
 
         if (AppDomain.CurrentDomain.FriendlyName.ToLower().Contains("ef"))
         {
             Console.WriteLine("🔧 EF Tools context detected. Skipping bot startup.");
             return;
         }
+
+        // Конфігурація (ENV + інші провайдери за потреби)
         var config = new ConfigurationBuilder()
             .AddEnvironmentVariables()
             .Build();
-        var cancellationToken = new CancellationTokenSource().Token;
 
+        // Зчитування змінних середовища БЕЗ NullReference
+        var botToken = Require(config, "BOT_TOKEN");
+        var monobankToken = Require(config, "MONOBANK_TOKEN");
+        var connectionString = Require(config, "DB_CONNECTION_STRING");
+
+        BotUsername = config["BOT_USERNAME"] ?? string.Empty;
+
+        var rawChannel = Require(config, "CHANNEL_USERNAME");
+        ChannelUsername = NormalizeChannel(rawChannel); // гарантуємо наявність '@'
+
+        var adminRaw = Require(config, "ADMIN_CHAT_ID");
+        if (!long.TryParse(adminRaw, out var adminId))
+        {
+            throw new InvalidOperationException("ADMIN_CHAT_ID має бути числом (long).");
+        }
+        AdminChatId = adminId;
+
+        var cancellationToken = new CancellationTokenSource().Token;
         var services = new ServiceCollection();
 
-        var botToken = Environment.GetEnvironmentVariable("BOT_TOKEN")!;
-        var monobankToken = Environment.GetEnvironmentVariable("MONOBANK_TOKEN")!;
-        var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING")!;
-
-        // TelegramBotClient — можна залишити Singleton
+        // TelegramBotClient — Singleton
         services.AddSingleton<ITelegramBotClient>(new TelegramBotClient(botToken));
-        // 2) Зареєструвати IConfiguration
+        // IConfiguration — Singleton
         services.AddSingleton<IConfiguration>(config);
 
         // DbContext — Scoped
@@ -56,7 +74,7 @@ public partial class Program
         services.AddScoped<IPostDraftService, PostDraftService>();
         services.AddScoped<IPostCounterService, PostCounterService>();
 
-        // PaymentService — теж Scoped
+        // PaymentService — Scoped
         services.AddScoped<PaymentService>(provider =>
         {
             var pending = provider.GetRequiredService<IPendingPaymentsService>();
@@ -71,6 +89,7 @@ public partial class Program
         services.AddScoped<MessageHandler>();
         services.AddScoped<PostPublisher>();
         services.AddScoped<PendingCleanupService>();
+
         services.AddScoped<UpdateRouter>(provider =>
         {
             var bot = provider.GetRequiredService<ITelegramBotClient>();
@@ -87,7 +106,7 @@ public partial class Program
             var draft = provider.GetRequiredService<IPostDraftService>();
             var postPublisher = provider.GetRequiredService<PostPublisher>();
             var postCounter = provider.GetRequiredService<IPostCounterService>();
-            return new PaymentPoller(paymentService, bot, cancellationToken, draft, postPublisher,postCounter);
+            return new PaymentPoller(paymentService, bot, cancellationToken, draft, postPublisher, postCounter);
         });
 
         services.AddScoped<AutoCleanupService>(provider =>
@@ -127,31 +146,31 @@ public partial class Program
                 await poller.RunAsync();
             }, cancellationToken);
 
-            // Автоочищення неоплачених публікацій(інтервал - 1 година)
+            // Автоочищення неоплачених публікацій (інтервал - 1 година)
             _ = Task.Run(async () =>
             {
-
                 using var s = provider.CreateScope();
                 var cleanup = s.ServiceProvider.GetRequiredService<PendingCleanupService>();
                 await cleanup.RunAsync();
             }, cancellationToken);
-            //Автоочищення старих платежів
+
+            // Автоочищення старих платежів / постів у каналі
             _ = Task.Run(async () =>
             {
                 using var s = provider.CreateScope();
-                var cleanOld= s.ServiceProvider.GetRequiredService<AutoCleanupService>();
+                var cleanOld = s.ServiceProvider.GetRequiredService<AutoCleanupService>();
                 await cleanOld.RunAsync();
             }, cancellationToken);
 
             // Запуск бота
             var botClient = scopedProvider.GetRequiredService<ITelegramBotClient>();
-            Console.WriteLine($"🤖 Bot {await botClient.GetMeAsync()} is running...");
+            var me = await botClient.GetMeAsync(cancellationToken);
+            Console.WriteLine($"🤖 Bot @{me.Username} is running...");
 
             var updateRouter = scopedProvider.GetRequiredService<UpdateRouter>();
 
             botClient.StartReceiving(
-                updateHandler: (bot, update, token) =>
-                    updateRouter.HandleUpdateAsync(update),
+                updateHandler: (bot, update, token) => updateRouter.HandleUpdateAsync(update),
                 pollingErrorHandler: async (client, exception, token) =>
                 {
                     Console.WriteLine($"❌ Telegram API Error: {exception.Message}");
@@ -167,5 +186,22 @@ public partial class Program
 
             await Task.Delay(-1, cancellationToken);
         }
+    }
+
+    private static string Require(IConfiguration config, string key)
+    {
+        var v = config[key];
+        if (string.IsNullOrWhiteSpace(v))
+        {
+            throw new InvalidOperationException($"ENV змінна '{key}' не встановлена.");
+        }
+        return v;
+    }
+
+    private static string NormalizeChannel(string channel)
+    {
+        channel = channel.Trim();
+        if (string.IsNullOrEmpty(channel)) return channel;
+        return channel.StartsWith("@") ? channel : "@" + channel;
     }
 }

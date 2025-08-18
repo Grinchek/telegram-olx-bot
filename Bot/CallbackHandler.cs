@@ -1,12 +1,12 @@
-﻿using Telegram.Bot;
+﻿using System;
+using System.Threading.Tasks;
+using System.Threading;
+using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 using Services.Interfaces;
 using Data.Entities;
-using System.Threading.Tasks;
-using System.Threading;
-using System.Net;
 using Services;
 
 namespace Bot;
@@ -19,8 +19,6 @@ public class CallbackHandler
     private readonly string _jarUrl;
     private readonly long _adminChatId;
     private readonly PostPublisher _postPublisher;
-
-
 
     public CallbackHandler(
         IConfirmedPaymentsService confirmedPaymentsService,
@@ -36,7 +34,6 @@ public class CallbackHandler
         _adminChatId = long.Parse(Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? "0");
     }
 
-    
     public async Task HandleCallbackAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
     {
         var callback = update.CallbackQuery;
@@ -44,7 +41,6 @@ public class CallbackHandler
 
         var chatId = callback.Message?.Chat.Id ?? 0;
         var messageId = callback.Message?.MessageId;
-        var inlineMessageId = callback.InlineMessageId;
 
         if (callback.Data == "confirm_publish")
         {
@@ -111,7 +107,7 @@ public class CallbackHandler
                     $"👉 <a href=\"{_jarUrl}\">Натисни тут</a>\n\n" +
                     $"📝 У коментарі до платежу введи цей код: <code>{code}</code>\n\n" +
                     $"⏱ Після сплати бот автоматично перевірить оплату та опублікує оголошення впродовж 1–5 хвилин.\n" +
-                    $"⏱ Оголошення на каналі автоматично видалиться через 3 дні";
+                    $"⏱ Оголошення на каналі автоматично видалиться через 72 години";
 
                 await botClient.SendTextMessageAsync(
                     chatId: chatId,
@@ -158,19 +154,17 @@ public class CallbackHandler
                 return;
             }
 
+            // Спробуємо знайти запис у БД (НЕ обов'язково для видалення)
             var postToRemove = await _confirmedPaymentsService.GetByChannelMessageIdAsync(msgIdToDelete);
-            if (postToRemove == null)
-            {
-                await botClient.AnswerCallbackQueryAsync(
-                    callbackQueryId: callback.Id,
-                    text: "⚠️ Оголошення не знайдено.",
-                    cancellationToken: cancellationToken);
-                return;
-            }
 
-            bool isOwner = callback.From.Id == postToRemove.ChatId;
+            // Перевірка прав:
+            // - якщо пост у БД є — власник або адмін
+            // - якщо посту немає — тільки адмін (бо нема чим підтвердити власника)
             bool isAdmin = callback.From.Id == _adminChatId;
-            if (!isOwner && !isAdmin)
+            bool canDelete = isAdmin ||
+                             (postToRemove != null && callback.From.Id == postToRemove.ChatId);
+
+            if (!canDelete)
             {
                 await botClient.AnswerCallbackQueryAsync(
                     callbackQueryId: callback.Id,
@@ -181,38 +175,45 @@ public class CallbackHandler
 
             try
             {
-                var channel = new ChatId("@baraholka_market_ua");
+                // Жодного хардкоду — канал беремо з конфігурації/Program
+                var channel = new ChatId(Program.ChannelUsername);
+
+                // 1) Спочатку видаляємо повідомлення з каналу
                 await botClient.DeleteMessageAsync(
                     chatId: channel,
                     messageId: msgIdToDelete,
                     cancellationToken: cancellationToken);
-
-                await _confirmedPaymentsService.RemoveAsync(postToRemove);
-                var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgIdToDelete);
-                if (affected == 0)
-                {
-                    await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
-                }
-
-                await botClient.AnswerCallbackQueryAsync(
-                    callbackQueryId: callback.Id,
-                    text: "✅ Оголошення видалено.",
-                    cancellationToken: cancellationToken);
             }
             catch (Exception ex)
             {
-                var shortError = ex.Message.Length > 180 ? ex.Message[..180] + "..." : ex.Message;
-                await botClient.AnswerCallbackQueryAsync(
-                    callbackQueryId: callback.Id,
-                    text: $"❌ Помилка: {shortError}",
-                    cancellationToken: cancellationToken);
+                // Якщо повідомлення вже видалене/недоступне — продовжимо чистку БД
+                var _ = ex; // no-op, або лог
             }
+
+            // 2) Потім (якщо є) чистимо БД
+            if (postToRemove != null)
+            {
+                try
+                {
+                    await _confirmedPaymentsService.RemoveAsync(postToRemove);
+                }
+                catch { /* no-op */ }
+
+                try
+                {
+                    var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgIdToDelete);
+                    if (affected == 0)
+                    {
+                        await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
+                    }
+                }
+                catch { /* no-op */ }
+            }
+
+            await botClient.AnswerCallbackQueryAsync(
+                callbackQueryId: callback.Id,
+                text: "✅ Оголошення видалено.",
+                cancellationToken: cancellationToken);
         }
     }
-
-
-
-
-
 }
-

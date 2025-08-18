@@ -1,5 +1,5 @@
-
 using Telegram.Bot;
+using Telegram.Bot.Types;
 using System;
 using System.Linq;
 using System.Threading;
@@ -13,6 +13,9 @@ public class AutoCleanupService
     private readonly IPostDraftService _postDraftSeevice;
     private readonly ITelegramBotClient _botClient;
     private readonly CancellationToken _cancellationToken;
+
+    // 72 години поріг для авто-видалення
+    private static readonly TimeSpan CleanupAge = TimeSpan.FromHours(72);
 
     public AutoCleanupService(
         IConfirmedPaymentsService confirmedPaymentsService,
@@ -32,6 +35,7 @@ public class AutoCleanupService
         {
             try
             {
+                Console.WriteLine("🧹 AutoCleanupService started");
                 var allPosts = await _confirmedPaymentsService.GetAllAsync();
                 var now = DateTime.UtcNow;
 
@@ -42,19 +46,29 @@ public class AutoCleanupService
                         continue;
 
                     var age = now - post.PublishedAt.Value;
-                    if (age.TotalDays >= 3)
+                    Console.WriteLine($"Age:{age}\nPublished:{post.PublishedAt.Value}");
+
+                    if (age >= CleanupAge)
                     {
                         try
                         {
+                            // 1) Спочатку видаляємо повідомлення з каналу
+                            var channel = Program.ChannelUsername; // без хардкоду
                             await _botClient.DeleteMessageAsync(
-                                chatId: "@baraholka_market_ua",
+                                chatId: channel,
                                 messageId: post.ChannelMessageId.Value,
                                 cancellationToken: _cancellationToken);
 
+                            // 2) Після успішного видалення — чистимо БД
                             await _confirmedPaymentsService.RemoveAsync(payment);
-                            await _postDraftSeevice.RemoveByPostIdAsync(payment.PostId);
 
-                            Console.WriteLine($"🧹 Видалено пост ID={payment.Id}, вік: {age.TotalDays:F1} днів");
+                            var removedByMsgId = await _postDraftSeevice.RemoveByChannelMessageIdAsync(post.ChannelMessageId.Value);
+                            if (removedByMsgId == 0)
+                            {
+                                await _postDraftSeevice.RemoveByPostIdAsync(payment.PostId);
+                            }
+
+                            Console.WriteLine($"🧹 Видалено пост ID={payment.Id}, вік: {age.TotalHours:F1} год");
                         }
                         catch (Exception ex)
                         {
@@ -68,7 +82,8 @@ public class AutoCleanupService
                 Console.WriteLine($"❌ AutoCleanupService error: {ex.Message}");
             }
 
-            await Task.Delay(TimeSpan.FromHours(3), _cancellationToken); // повтор кожні 3 год
+            // Частота перевірок: кожні 3 години 
+            await Task.Delay(TimeSpan.FromHours(3), _cancellationToken);
         }
     }
 }
