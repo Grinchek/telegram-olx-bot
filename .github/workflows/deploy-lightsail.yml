@@ -1,0 +1,101 @@
+name: Deploy to Lightsail Container Service
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install lightsailctl and jq
+        run: |
+          curl -s https://s3.amazonaws.com/amazonlightsail-us-east-1/lightsailctl/latest/linux-amd64/lightsailctl -o lightsailctl
+          sudo mv lightsailctl /usr/local/bin/lightsailctl
+          sudo chmod +x /usr/local/bin/lightsailctl
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Debug AWS identity and service
+        run: |
+          aws sts get-caller-identity
+          echo "REGION=${{ secrets.AWS_REGION }}"
+          echo "SERVICE=${{ secrets.LIGHTSAIL_SERVICE_NAME }}"
+          aws lightsail get-container-services \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
+            --region "${{ secrets.AWS_REGION }}"
+
+      - name: Select Dockerfile
+        id: df
+        run: |
+          if [ -f Dockerfile.hardened ]; then
+            echo "path=Dockerfile.hardened" >> $GITHUB_OUTPUT
+          else
+            echo "path=Dockerfile" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build image
+        run: docker build -t bot:latest -f ${{ steps.df.outputs.path }} .
+
+      - name: Push image to Lightsail
+        id: push
+        run: |
+          set -euo pipefail
+          aws lightsail push-container-image \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
+            --label bot \
+            --image bot:latest \
+            --region "${{ secrets.AWS_REGION }}" > push.json
+          echo "===== push.json ====="
+          cat push.json
+          echo "image_uri=$(jq -r '.image' push.json)" >> $GITHUB_OUTPUT
+
+      - name: Create deployment spec (no publicEndpoint)
+        run: |
+          cat > spec.json <<'JSON'
+          {
+            "serviceName": "${{ secrets.LIGHTSAIL_SERVICE_NAME }}",
+            "containers": {
+              "bot": {
+                "image": "${{ steps.push.outputs.image_uri }}",
+                "environment": {
+                  "BOT_TOKEN": "${{ secrets.BOT_TOKEN }}",
+                  "MONOBANK_TOKEN": "${{ secrets.MONOBANK_TOKEN }}",
+                  "MONOBANK_ACCOUNT_ID": "${{ secrets.MONOBANK_ACCOUNT_ID }}",
+                  "DB_CONNECTION_STRING": "${{ secrets.DB_CONNECTION_STRING }}",
+                  "CHANNEL_USERNAME": "${{ secrets.CHANNEL_USERNAME }}",
+                  "ADMIN_CHAT_ID": "${{ secrets.ADMIN_CHAT_ID }}",
+                  "BOT_USERNAME": "${{ secrets.BOT_USERNAME }}",
+                  "MONO_JAR_URL": "${{ secrets.MONO_JAR_URL }}"
+                },
+                "command": [],
+                "ports": {}
+              }
+            }
+          }
+          JSON
+          echo "===== spec.json ====="
+          cat spec.json
+
+      - name: Deploy to Lightsail
+        run: |
+          aws lightsail create-container-service-deployment \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
+            --cli-input-json file://spec.json \
+            --region "${{ secrets.AWS_REGION }}"
+
+      - name: Verify deployment
+        run: |
+          aws lightsail get-container-services \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
+            --region "${{ secrets.AWS_REGION }}"
