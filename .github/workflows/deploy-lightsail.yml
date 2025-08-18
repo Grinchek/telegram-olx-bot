@@ -49,13 +49,19 @@ jobs:
 
       - name: Push image to Lightsail (label=bot)
         run: |
+          set -euo pipefail
           aws lightsail push-container-image \
             --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
             --label bot \
             --image bot:latest \
             --region "${{ secrets.AWS_REGION }}"
 
-      # ВАЖЛИВО: не парсимо push.json. Вказуємо образ як <service>:bot
+      - name: Verify images exist in Lightsail
+        run: |
+          aws lightsail get-container-images \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
+            --region "${{ secrets.AWS_REGION }}"
+
       - name: Create deployment spec (no publicEndpoint)
         run: |
           cat > spec.json <<'JSON'
@@ -74,7 +80,7 @@ jobs:
                   "BOT_USERNAME": "${{ secrets.BOT_USERNAME }}",
                   "MONO_JAR_URL": "${{ secrets.MONO_JAR_URL }}"
                 },
-                "command": [],
+                "command": ["TelegramOlxBot.dll"],
                 "ports": {}
               }
             }
