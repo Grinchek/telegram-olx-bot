@@ -23,17 +23,7 @@ jobs:
           curl -s https://s3.amazonaws.com/amazonlightsail-us-east-1/lightsailctl/latest/linux-amd64/lightsailctl -o lightsailctl
           sudo mv lightsailctl /usr/local/bin/lightsailctl
           sudo chmod +x /usr/local/bin/lightsailctl
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      - name: Debug AWS identity and service
-        run: |
-          aws sts get-caller-identity
-          echo "REGION=${{ secrets.AWS_REGION }}"
-          echo "SERVICE=${{ secrets.LIGHTSAIL_SERVICE_NAME }}"
-          aws lightsail get-container-services \
-            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
-            --region "${{ secrets.AWS_REGION }}"
+          sudo apt-get update && sudo apt-get install -y jq
 
       - name: Select Dockerfile
         id: df
@@ -47,18 +37,29 @@ jobs:
       - name: Build image
         run: docker build -t bot:latest -f ${{ steps.df.outputs.path }} .
 
-      - name: Push image to Lightsail
-        id: push
+      - name: Push image to Lightsail (label=bot)
         run: |
           set -euo pipefail
           aws lightsail push-container-image \
             --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
             --label bot \
             --image bot:latest \
-            --region "${{ secrets.AWS_REGION }}" > push.json
-          echo "===== push.json ====="
-          cat push.json
-          echo "image_uri=$(jq -r '.image' push.json)" >> $GITHUB_OUTPUT
+            --region "${{ secrets.AWS_REGION }}"
+
+      - name: Wait until image is visible in Lightsail
+        run: |
+          set -euo pipefail
+          SERVICE="${{ secrets.LIGHTSAIL_SERVICE_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          echo "Waiting for image ${SERVICE}:bot to appear..."
+          for i in {1..12}; do
+            OUT="$(aws lightsail get-container-images --service-name "$SERVICE" --region "$REGION")"
+            echo "$OUT"
+            echo "$OUT" | jq -e '.containerImages[] | select(.image=="'"$SERVICE"':bot")' >/dev/null && break
+            echo "Not visible yet. Retry $i/12..."
+            sleep 10
+          done
+          echo "$OUT" | jq -e '.containerImages[] | select(.image=="'"$SERVICE"':bot")' >/dev/null || { echo "Image not found after retries"; exit 1; }
 
       - name: Create deployment spec (no publicEndpoint)
         run: |
@@ -67,7 +68,7 @@ jobs:
             "serviceName": "${{ secrets.LIGHTSAIL_SERVICE_NAME }}",
             "containers": {
               "bot": {
-                "image": "${{ steps.push.outputs.image_uri }}",
+                "image": "${{ secrets.LIGHTSAIL_SERVICE_NAME }}:bot",
                 "environment": {
                   "BOT_TOKEN": "${{ secrets.BOT_TOKEN }}",
                   "MONOBANK_TOKEN": "${{ secrets.MONOBANK_TOKEN }}",
@@ -78,7 +79,7 @@ jobs:
                   "BOT_USERNAME": "${{ secrets.BOT_USERNAME }}",
                   "MONO_JAR_URL": "${{ secrets.MONO_JAR_URL }}"
                 },
-                "command": [],
+                "command": ["TelegramOlxBot.dll"],
                 "ports": {}
               }
             }
