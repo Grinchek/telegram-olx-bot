@@ -40,12 +40,17 @@ jobs:
           set -euo pipefail
           REGION="${{ secrets.AWS_REGION }}"
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          REPO="${{ secrets.ECR_REPOSITORY:-olxbot }}"
-          ECR_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO:latest"
+
+          # беремо значення з секрету, а якщо порожнє — дефолт 'olxbot'
+          REPO="${{ secrets.ECR_REPOSITORY }}"
+          : "${REPO:=olxbot}"
+
+          ECR_REG="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          ECR_URI="${ECR_REG}/${REPO}:latest"
 
           # login
           aws ecr get-login-password --region "$REGION" \
-            | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+            | docker login --username AWS --password-stdin "$ECR_REG"
 
           # create repo if absent
           aws ecr describe-repositories --repository-names "$REPO" --region "$REGION" >/dev/null 2>&1 \
