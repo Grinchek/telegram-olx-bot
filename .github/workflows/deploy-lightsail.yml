@@ -37,29 +37,24 @@ jobs:
       - name: Build image
         run: docker build -t bot:latest -f ${{ steps.df.outputs.path }} .
 
-      - name: Push image to Lightsail (label=bot)
+      - name: Push image to Lightsail (capture image URI)
+        id: push
         run: |
           set -euo pipefail
           aws lightsail push-container-image \
             --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
             --label bot \
             --image bot:latest \
-            --region "${{ secrets.AWS_REGION }}"
-
-      - name: Wait until image is visible in Lightsail
-        run: |
-          set -euo pipefail
-          SERVICE="${{ secrets.LIGHTSAIL_SERVICE_NAME }}"
-          REGION="${{ secrets.AWS_REGION }}"
-          echo "Waiting for image ${SERVICE}:bot to appear..."
-          for i in {1..12}; do
-            OUT="$(aws lightsail get-container-images --service-name "$SERVICE" --region "$REGION")"
-            echo "$OUT"
-            echo "$OUT" | jq -e '.containerImages[] | select(.image=="'"$SERVICE"':bot")' >/dev/null && break
-            echo "Not visible yet. Retry $i/12..."
-            sleep 10
-          done
-          echo "$OUT" | jq -e '.containerImages[] | select(.image=="'"$SERVICE"':bot")' >/dev/null || { echo "Image not found after retries"; exit 1; }
+            --region "${{ secrets.AWS_REGION }}" \
+            --output json > push.json
+          echo "===== push.json ====="
+          cat push.json
+          URI=$(jq -r '.image' push.json)
+          if [ -z "$URI" ] || [ "$URI" = "null" ]; then
+            echo "Did not get image URI from push.json"; exit 1
+          fi
+          echo "image_uri=$URI" >> $GITHUB_OUTPUT
+          echo "IMAGE_URI=$URI"
 
       - name: Create deployment spec (no publicEndpoint)
         run: |
@@ -68,7 +63,7 @@ jobs:
             "serviceName": "${{ secrets.LIGHTSAIL_SERVICE_NAME }}",
             "containers": {
               "bot": {
-                "image": "${{ secrets.LIGHTSAIL_SERVICE_NAME }}:bot",
+                "image": "${{ steps.push.outputs.image_uri }}",
                 "environment": {
                   "BOT_TOKEN": "${{ secrets.BOT_TOKEN }}",
                   "MONOBANK_TOKEN": "${{ secrets.MONOBANK_TOKEN }}",
