@@ -6,6 +6,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      AWS_PAGER: ""   # щоб aws-cli не відкривав пейджер
 
     steps:
       - name: Checkout repository
@@ -25,6 +27,15 @@ jobs:
           sudo chmod +x /usr/local/bin/lightsailctl
           sudo apt-get update && sudo apt-get install -y jq
 
+      - name: Debug identity and service
+        run: |
+          aws sts get-caller-identity
+          echo "REGION=${{ secrets.AWS_REGION }}"
+          echo "SERVICE=${{ secrets.LIGHTSAIL_SERVICE_NAME }}"
+          aws lightsail get-container-services \
+            --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
+            --region "${{ secrets.AWS_REGION }}"
+
       - name: Select Dockerfile
         id: df
         run: |
@@ -37,24 +48,37 @@ jobs:
       - name: Build image
         run: docker build -t bot:latest -f ${{ steps.df.outputs.path }} .
 
-      - name: Push image to Lightsail (capture image URI)
+      - name: Push image to Lightsail (capture image URI robustly)
         id: push
         run: |
           set -euo pipefail
+          # Захоплюємо І stdout, І stderr (lightsailctl часто пише JSON у stderr)
           aws lightsail push-container-image \
             --service-name "${{ secrets.LIGHTSAIL_SERVICE_NAME }}" \
             --label bot \
             --image bot:latest \
-            --region "${{ secrets.AWS_REGION }}" \
-            --output json > push.json
-          echo "===== push.json ====="
-          cat push.json
-          URI=$(jq -r '.image' push.json)
+            --region "${{ secrets.AWS_REGION }}" 2>&1 | tee /tmp/push.out
+
+          echo "===== raw push output ====="
+          sed -n '1,200p' /tmp/push.out || true
+
+          # 1) спроба зчитати JSON-поле .image
+          URI="$(jq -r '.image // empty' /tmp/push.out 2>/dev/null || true)"
+
+          # 2) спроба витягнути з рядка "image: <value>"
           if [ -z "$URI" ] || [ "$URI" = "null" ]; then
-            echo "Did not get image URI from push.json"; exit 1
+            URI="$(grep -oE 'image:\s*[^[:space:]]+' /tmp/push.out | head -n1 | sed 's/image:\s*//')"
           fi
+
+          # 3) фолбек на SERVICE:bot
+          if [ -z "$URI" ] || [ "$URI" = "null" ]; then
+            URI="${{ secrets.LIGHTSAIL_SERVICE_NAME }}:bot"
+            echo "Did not parse image URI from output. Falling back to: $URI"
+          else
+            echo "Parsed image URI: $URI"
+          fi
+
           echo "image_uri=$URI" >> $GITHUB_OUTPUT
-          echo "IMAGE_URI=$URI"
 
       - name: Create deployment spec (no publicEndpoint)
         run: |
