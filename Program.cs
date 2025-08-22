@@ -66,7 +66,14 @@ public partial class Program
 
         // DbContext — Scoped
         services.AddDbContext<BotDbContext>(options =>
-            options.UseNpgsql(connectionString));
+        {
+            options.UseNpgsql(connectionString);
+            options.EnableSensitiveDataLogging();
+            options.EnableDetailedErrors();
+
+        });
+        
+
 
         // Scoped сервіси
         services.AddScoped<IPendingPaymentsService, PendingPaymentsService>();
