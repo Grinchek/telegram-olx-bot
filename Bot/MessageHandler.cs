@@ -96,6 +96,7 @@ namespace Bot
                 try
                 {
                     var postData = await OlxParser.ParseOlxAsync(olxUrl!);
+                    postData.ImageUrl ??= "https://via.placeholder.com/300";
                     // Зберігаємо в чернетки
                     await _postDraftService.SaveDraftAsync(chatId, postData);
 

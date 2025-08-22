@@ -77,6 +77,9 @@ namespace Services
                     .SelectSingleNode("//meta[@property='og:image']")?
                     .GetAttributeValue("content", null);
             }
+            var safeImageUrl = string.IsNullOrWhiteSpace(imageUrl)
+                ? "https://via.placeholder.com/300"
+                : imageUrl;
 
             return new PostData
             {
@@ -100,6 +103,6 @@ namespace Services
 
             return cleaned;
         }
-        
+
     }
 }
