@@ -7,13 +7,12 @@ using Microsoft.EntityFrameworkCore;
 using Data;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
-using System;
+using Microsoft.Extensions.Logging;
 
 public partial class Program
 {
-    // Будуть ініціалізовані в Main після Env.Load()
     public static string BotUsername { get; private set; } = string.Empty;
-    public static string ChannelUsername { get; private set; } = string.Empty; // Єдине джерело правди
+    public static string ChannelUsername { get; private set; } = string.Empty;
     public static long AdminChatId { get; private set; }
 
     public static PaymentService PaymentService { get; set; } = default!;
@@ -23,41 +22,44 @@ public partial class Program
 
     public static async Task Main(string[] args)
     {
-        // Вихід для EF tools
         if (args.Contains("ef")) return;
 
-        Env.Load(); // Підхоплюємо .env ДО читання змінних середовища
+        // Локально підхопимо .env, на проді працює EnvironmentFile systemd
+        try { Env.Load(); } catch { }
 
-        if (AppDomain.CurrentDomain.FriendlyName.ToLower().Contains("ef"))
-        {
-            Console.WriteLine("🔧 EF Tools context detected. Skipping bot startup.");
-            return;
-        }
-
-        // Конфігурація (ENV + інші провайдери за потреби)
         var config = new ConfigurationBuilder()
             .AddEnvironmentVariables()
             .Build();
 
-        // Зчитування змінних середовища БЕЗ NullReference
         var botToken = Require(config, "BOT_TOKEN");
         var monobankToken = Require(config, "MONOBANK_TOKEN");
         var connectionString = Require(config, "DB_CONNECTION_STRING");
 
         BotUsername = config["BOT_USERNAME"] ?? string.Empty;
-
-        var rawChannel = Require(config, "CHANNEL_USERNAME");
-        ChannelUsername = NormalizeChannel(rawChannel); // гарантуємо наявність '@'
+        ChannelUsername = NormalizeChannel(Require(config, "CHANNEL_USERNAME"));
 
         var adminRaw = Require(config, "ADMIN_CHAT_ID");
         if (!long.TryParse(adminRaw, out var adminId))
-        {
             throw new InvalidOperationException("ADMIN_CHAT_ID має бути числом (long).");
-        }
         AdminChatId = adminId;
 
         var cancellationToken = new CancellationTokenSource().Token;
         var services = new ServiceCollection();
+
+        // Логування
+        services.AddLogging(lb =>
+        {
+            lb.ClearProviders();
+            lb.AddSimpleConsole(o =>
+            {
+                o.IncludeScopes = true;
+                o.SingleLine = true;
+                o.TimestampFormat = "HH:mm:ss ";
+            });
+            lb.SetMinimumLevel(LogLevel.Information);
+            lb.AddFilter("Microsoft.EntityFrameworkCore", LogLevel.Information);
+            lb.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Information);
+        });
 
         // TelegramBotClient — Singleton
         services.AddSingleton<ITelegramBotClient>(new TelegramBotClient(botToken));
@@ -67,13 +69,18 @@ public partial class Program
         // DbContext — Scoped
         services.AddDbContext<BotDbContext>(options =>
         {
-            options.UseNpgsql(connectionString);
-            options.EnableSensitiveDataLogging();
-            options.EnableDetailedErrors();
-
+            options
+                .UseNpgsql(connectionString)
+                .EnableSensitiveDataLogging()
+                .EnableDetailedErrors()
+                .LogTo(Console.WriteLine,
+                    new[]
+                    {
+                        DbLoggerCategory.Database.Command.Name,
+                        DbLoggerCategory.Update.Name
+                    },
+                    LogLevel.Information);
         });
-        
-
 
         // Scoped сервіси
         services.AddScoped<IPendingPaymentsService, PendingPaymentsService>();
@@ -81,7 +88,6 @@ public partial class Program
         services.AddScoped<IPostDraftService, PostDraftService>();
         services.AddScoped<IPostCounterService, PostCounterService>();
 
-        // PaymentService — Scoped
         services.AddScoped<PaymentService>(provider =>
         {
             var pending = provider.GetRequiredService<IPendingPaymentsService>();
@@ -91,7 +97,6 @@ public partial class Program
             return new PaymentService(context, cfg, pending, confirmed);
         });
 
-        // Інші Scoped класи
         services.AddScoped<CallbackHandler>();
         services.AddScoped<MessageHandler>();
         services.AddScoped<PostPublisher>();
@@ -125,15 +130,18 @@ public partial class Program
         });
 
         var provider = services.BuildServiceProvider();
+        var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger<Program>();
 
-        // Міграція БД
+        // Міграція
         using (var scope = provider.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            logger.LogInformation("Applying migrations...");
             db.Database.Migrate();
+            logger.LogInformation("Migrations applied.");
         }
 
-        // Глобальні сервіси
+        // Глобальні сервіси і запуск бота
         using (var scope = provider.CreateScope())
         {
             var scopedProvider = scope.ServiceProvider;
@@ -143,9 +151,7 @@ public partial class Program
             PostCounterService = scopedProvider.GetRequiredService<IPostCounterService>();
             PendingPaymentsService = scopedProvider.GetRequiredService<IPendingPaymentsService>();
 
-            // Фонові служби з використанням scoped-інстансів
-
-            // Перевірка платежів
+            // Фонові завдання
             _ = Task.Run(async () =>
             {
                 using var s = provider.CreateScope();
@@ -153,7 +159,6 @@ public partial class Program
                 await poller.RunAsync();
             }, cancellationToken);
 
-            // Автоочищення неоплачених публікацій (інтервал - 1 година)
             _ = Task.Run(async () =>
             {
                 using var s = provider.CreateScope();
@@ -161,7 +166,6 @@ public partial class Program
                 await cleanup.RunAsync();
             }, cancellationToken);
 
-            // Автоочищення старих платежів / постів у каналі
             _ = Task.Run(async () =>
             {
                 using var s = provider.CreateScope();
@@ -180,7 +184,9 @@ public partial class Program
                 updateHandler: (bot, update, token) => updateRouter.HandleUpdateAsync(update),
                 pollingErrorHandler: async (client, exception, token) =>
                 {
-                    Console.WriteLine($"❌ Telegram API Error: {exception.Message}");
+                    Console.WriteLine($"❌ Telegram API Error: {exception.GetType().Name}: {exception.Message}");
+                    if (exception.InnerException != null)
+                        Console.WriteLine($"   Inner: {exception.InnerException.GetType().Name}: {exception.InnerException.Message}");
                 },
                 cancellationToken: cancellationToken
             );
@@ -199,9 +205,7 @@ public partial class Program
     {
         var v = config[key];
         if (string.IsNullOrWhiteSpace(v))
-        {
             throw new InvalidOperationException($"ENV змінна '{key}' не встановлена.");
-        }
         return v;
     }
 
