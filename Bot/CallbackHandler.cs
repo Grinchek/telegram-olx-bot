@@ -314,23 +314,23 @@ public class CallbackHandler
     }
     #region Subscription Check
     private static async Task<bool> IsSubscribedAsync(
-        ITelegramBotClient bot,
-        string channelUsername,
-        long userId,
-        CancellationToken ct)
+    ITelegramBotClient bot,
+    string channelUsername,
+    long userId,
+    CancellationToken ct)
     {
         try
         {
             var member = await bot.GetChatMemberAsync(new ChatId(channelUsername), userId, ct);
 
-            // Вважаємо підписаним: owner, admin, member, а також restricted із IsMember=true
-            return member.Status switch
+            // Перевіряємо конкретні підтипи ChatMember:
+            return member switch
             {
-                ChatMemberStatus.Creator => true,
-                ChatMemberStatus.Administrator => true,
-                ChatMemberStatus.Member => true,
-                ChatMemberStatus.Restricted => (member.IsMember ?? false),
-                _ => false
+                Telegram.Bot.Types.ChatMemberOwner => true, // власник каналу
+                Telegram.Bot.Types.ChatMemberAdministrator => true, // адміністратор
+                Telegram.Bot.Types.ChatMemberMember => true, // звичайний учасник
+                Telegram.Bot.Types.ChatMemberRestricted r => r.IsMember, // restricted, але залишається учасником
+                _ => false // Left / Banned / інше
             };
         }
         catch (ApiRequestException ex) when (ex.ErrorCode == 400 || ex.Message.Contains("user not found"))
@@ -340,9 +340,10 @@ public class CallbackHandler
         }
         catch
         {
-            // У разі інших помилок краще не пускати
+            // На будь-яку іншу помилку — вважаємо, що не підписаний
             return false;
         }
     }
+
     #endregion
 }
