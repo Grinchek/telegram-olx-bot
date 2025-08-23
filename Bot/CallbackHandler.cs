@@ -2,12 +2,47 @@
 using System.Threading.Tasks;
 using System.Threading;
 using Telegram.Bot;
+using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 using Services.Interfaces;
 using Data.Entities;
 using Services;
+
+#region Subscription Check
+private static async Task<bool> IsSubscribedAsync(
+    ITelegramBotClient bot,
+    string channelUsername,
+    long userId,
+    CancellationToken ct)
+{
+    try
+    {
+        var member = await bot.GetChatMemberAsync(new ChatId(channelUsername), userId, ct);
+
+        // Вважаємо підписаним: owner, admin, member, а також restricted із IsMember=true
+        return member.Status switch
+        {
+            ChatMemberStatus.Creator => true,
+            ChatMemberStatus.Administrator => true,
+            ChatMemberStatus.Member => true,
+            ChatMemberStatus.Restricted => (member.IsMember ?? false),
+            _ => false
+        };
+    }
+    catch (ApiRequestException ex) when (ex.ErrorCode == 400 || ex.Message.Contains("user not found"))
+    {
+        // 400 Bad Request / user not found — не підписаний
+        return false;
+    }
+    catch
+    {
+        // У разі інших помилок краще не пускати
+        return false;
+    }
+}
+#endregion
 
 namespace Bot;
 
@@ -41,7 +76,7 @@ public class CallbackHandler
 
         var chatId = callback.Message?.Chat.Id ?? 0;
         var messageId = callback.Message?.MessageId;
-
+        // Temporary free publish implementation
         if (callback.Data == "confirm_publish")
         {
             var pending = await _pendingPaymentsService.GetLastByChatIdAsync(chatId);
@@ -55,26 +90,36 @@ public class CallbackHandler
             }
 
             var post = pending.Post!;
-            bool isAdmin = chatId == _adminChatId;
+            bool isAdmin = callback.From.Id == _adminChatId;
 
-            if (isAdmin)
+            // Перевірка підписки (адміну дозволяємо завжди)
+            bool isSubscribed = isAdmin ||
+                await IsSubscribedAsync(botClient, Program.ChannelUsername, callback.From.Id, cancellationToken);
+
+            if (!isSubscribed)
             {
-                var publishedMsgId = await _postPublisher.PublishPostAsync(post, chatId, true, cancellationToken);
-                post.PublishedAt = DateTime.UtcNow;
-                post.ChannelMessageId = publishedMsgId;
-
-                var confirmed = new ConfirmedPayment
+                // Кнопка з переходом на канал + кнопка повторної перевірки
+                var url = $"https://t.me/{Program.ChannelUsername.TrimStart('@')}";
+                var kb = new InlineKeyboardMarkup(new[]
                 {
-                    ChatId = chatId,
-                    Code = "FREE",
-                    Post = post,
-                    RequestedAt = DateTime.UtcNow,
-                    TransactionId = null
-                };
+            new[]
+            {
+                InlineKeyboardButton.WithUrl("🔔 Підписатися на канал", url)
+            },
+            new[]
+            {
+                // Та ж сама callback-дія, щоб користувач натиснув і ми перевірили ще раз
+                InlineKeyboardButton.WithCallbackData("✅ Перевірити підписку", "confirm_publish")
+            }
+        });
 
-                await _confirmedPaymentsService.AddAsync(confirmed);
-                await _pendingPaymentsService.RemoveAsync(pending);
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: "Щоб опублікувати оголошення, спочатку підпишіться на наш канал 🙂",
+                    replyMarkup: kb,
+                    cancellationToken: cancellationToken);
 
+                // Можна прибрати кнопки під старим повідомленням
                 if (messageId.HasValue)
                 {
                     await botClient.EditMessageReplyMarkupAsync(
@@ -84,39 +129,122 @@ public class CallbackHandler
                         cancellationToken: cancellationToken);
                 }
 
-                await botClient.SendTextMessageAsync(
-                    chatId: chatId,
-                    text: "✅ Оголошення опубліковано безкоштовно (адмін).",
-                    cancellationToken: cancellationToken);
+                return;
             }
-            else
+
+            // --- тут логіка безкоштовної публікації для підписників/адміна ---
+            var publishedMsgId = await _postPublisher.PublishPostAsync(post, chatId, true, cancellationToken);
+            post.PublishedAt = DateTime.UtcNow;
+            post.ChannelMessageId = publishedMsgId;
+
+            var confirmed = new ConfirmedPayment
             {
-                var code = await Program.PaymentService.GeneratePaymentCode(chatId, post);
+                ChatId = chatId,
+                Code = "FREE",
+                Post = post,
+                RequestedAt = DateTime.UtcNow,
+                TransactionId = null
+            };
 
-                if (messageId.HasValue)
-                {
-                    await botClient.EditMessageReplyMarkupAsync(
-                        chatId: chatId,
-                        messageId: messageId.Value,
-                        replyMarkup: null,
-                        cancellationToken: cancellationToken);
-                }
+            await _confirmedPaymentsService.AddAsync(confirmed);
+            await _pendingPaymentsService.RemoveAsync(pending);
 
-                var text =
-                    $"💳 Щоб опублікувати оголошення, сплати 15 грн на банку:\n" +
-                    $"👉 <a href=\"{_jarUrl}\">Натисни тут</a>\n\n" +
-                    $"📝 У коментарі до платежу введи цей код: <code>{code}</code>\n\n" +
-                    $"⏱ Після сплати бот автоматично перевірить оплату та опублікує оголошення впродовж 1–5 хвилин.\n" +
-                    $"⏱ Оголошення на каналі автоматично видалиться через 72 години";
-
-                await botClient.SendTextMessageAsync(
+            if (messageId.HasValue)
+            {
+                await botClient.EditMessageReplyMarkupAsync(
                     chatId: chatId,
-                    text: text,
-                    parseMode: ParseMode.Html,
-                    replyMarkup: KeyboardFactory.MainButtons(),
+                    messageId: messageId.Value,
+                    replyMarkup: null,
                     cancellationToken: cancellationToken);
             }
+
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "✅ Оголошення опубліковано.",
+                cancellationToken: cancellationToken);
         }
+
+        // Paid implementation is currently disabled
+        //if (callback.Data == "confirm_publish")
+        //{
+        //    var pending = await _pendingPaymentsService.GetLastByChatIdAsync(chatId);
+        //    if (pending == null || pending.Post == null)
+        //    {
+        //        await botClient.AnswerCallbackQueryAsync(
+        //            callbackQueryId: callback.Id,
+        //            text: "⛔ Немає оголошення для публікації.",
+        //            cancellationToken: cancellationToken);
+        //        return;
+        //    }
+
+        //    var post = pending.Post!;
+        //    bool isAdmin = chatId == _adminChatId;
+
+
+        //    if (isAdmin)
+
+        //    {
+        //        var publishedMsgId = await _postPublisher.PublishPostAsync(post, chatId, true, cancellationToken);
+        //        post.PublishedAt = DateTime.UtcNow;
+        //        post.ChannelMessageId = publishedMsgId;
+
+        //        var confirmed = new ConfirmedPayment
+        //        {
+        //            ChatId = chatId,
+        //            Code = "FREE",
+        //            Post = post,
+        //            RequestedAt = DateTime.UtcNow,
+        //            TransactionId = null
+        //        };
+
+        //        await _confirmedPaymentsService.AddAsync(confirmed);
+        //        await _pendingPaymentsService.RemoveAsync(pending);
+
+        //        if (messageId.HasValue)
+        //        {
+        //            await botClient.EditMessageReplyMarkupAsync(
+        //                chatId: chatId,
+        //                messageId: messageId.Value,
+        //                replyMarkup: null,
+        //                cancellationToken: cancellationToken);
+        //        }
+
+        //        await botClient.SendTextMessageAsync(
+        //            chatId: chatId,
+        //            text: "✅ Оголошення опубліковано безкоштовно (адмін).",
+        //            cancellationToken: cancellationToken);
+        //    }
+
+        //    else
+        //    {
+
+
+        //        var code = await Program.PaymentService.GeneratePaymentCode(chatId, post);
+
+        //        if (messageId.HasValue)
+        //        {
+        //            await botClient.EditMessageReplyMarkupAsync(
+        //                chatId: chatId,
+        //                messageId: messageId.Value,
+        //                replyMarkup: null,
+        //                cancellationToken: cancellationToken);
+        //        }
+
+        //        var text =
+        //            $"💳 Щоб опублікувати оголошення, сплати 15 грн на банку:\n" +
+        //            $"👉 <a href=\"{_jarUrl}\">Натисни тут</a>\n\n" +
+        //            $"📝 У коментарі до платежу введи цей код: <code>{code}</code>\n\n" +
+        //            $"⏱ Після сплати бот автоматично перевірить оплату та опублікує оголошення впродовж 1–5 хвилин.\n" +
+        //            $"⏱ Оголошення на каналі автоматично видалиться через 72 години";
+
+        //        await botClient.SendTextMessageAsync(
+        //            chatId: chatId,
+        //            text: text,
+        //            parseMode: ParseMode.Html,
+        //            replyMarkup: KeyboardFactory.MainButtons(),
+        //            cancellationToken: cancellationToken);
+        //    }
+        //}
         else if (callback.Data == "cancel")
         {
             var pending = await _pendingPaymentsService.GetLastByChatIdAsync(chatId);
