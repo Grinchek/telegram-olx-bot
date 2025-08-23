@@ -10,39 +10,7 @@ using Services.Interfaces;
 using Data.Entities;
 using Services;
 
-#region Subscription Check
-private static async Task<bool> IsSubscribedAsync(
-    ITelegramBotClient bot,
-    string channelUsername,
-    long userId,
-    CancellationToken ct)
-{
-    try
-    {
-        var member = await bot.GetChatMemberAsync(new ChatId(channelUsername), userId, ct);
 
-        // Вважаємо підписаним: owner, admin, member, а також restricted із IsMember=true
-        return member.Status switch
-        {
-            ChatMemberStatus.Creator => true,
-            ChatMemberStatus.Administrator => true,
-            ChatMemberStatus.Member => true,
-            ChatMemberStatus.Restricted => (member.IsMember ?? false),
-            _ => false
-        };
-    }
-    catch (ApiRequestException ex) when (ex.ErrorCode == 400 || ex.Message.Contains("user not found"))
-    {
-        // 400 Bad Request / user not found — не підписаний
-        return false;
-    }
-    catch
-    {
-        // У разі інших помилок краще не пускати
-        return false;
-    }
-}
-#endregion
 
 namespace Bot;
 
@@ -344,4 +312,37 @@ public class CallbackHandler
                 cancellationToken: cancellationToken);
         }
     }
+    #region Subscription Check
+    private static async Task<bool> IsSubscribedAsync(
+        ITelegramBotClient bot,
+        string channelUsername,
+        long userId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var member = await bot.GetChatMemberAsync(new ChatId(channelUsername), userId, ct);
+
+            // Вважаємо підписаним: owner, admin, member, а також restricted із IsMember=true
+            return member.Status switch
+            {
+                ChatMemberStatus.Creator => true,
+                ChatMemberStatus.Administrator => true,
+                ChatMemberStatus.Member => true,
+                ChatMemberStatus.Restricted => (member.IsMember ?? false),
+                _ => false
+            };
+        }
+        catch (ApiRequestException ex) when (ex.ErrorCode == 400 || ex.Message.Contains("user not found"))
+        {
+            // 400 Bad Request / user not found — не підписаний
+            return false;
+        }
+        catch
+        {
+            // У разі інших помилок краще не пускати
+            return false;
+        }
+    }
+    #endregion
 }
