@@ -14,8 +14,8 @@ public class AutoCleanupService
     private readonly ITelegramBotClient _botClient;
     private readonly CancellationToken _cancellationToken;
 
-    // 72 години поріг для авто-видалення
-    private static readonly TimeSpan CleanupAge = TimeSpan.FromHours(72);
+    // 47 години поріг для авто-видалення
+    private static readonly TimeSpan CleanupAge = TimeSpan.FromHours(47);
 
     public AutoCleanupService(
         IConfirmedPaymentsService confirmedPaymentsService,
