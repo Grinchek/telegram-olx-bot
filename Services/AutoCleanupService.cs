@@ -83,7 +83,7 @@ public class AutoCleanupService
             }
 
             // Частота перевірок: кожні 3 години 
-            await Task.Delay(TimeSpan.FromHours(3), _cancellationToken);
+            await Task.Delay(TimeSpan.FromHours(1), _cancellationToken);
         }
     }
 }
