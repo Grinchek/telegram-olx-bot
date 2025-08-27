@@ -254,8 +254,6 @@ public class CallbackHandler
             var postToRemove = await _confirmedPaymentsService.GetByChannelMessageIdAsync(msgIdToDelete);
 
             // Перевірка прав:
-            // - якщо пост у БД є — власник або адмін
-            // - якщо посту немає — тільки адмін (бо нема чим підтвердити власника)
             bool isAdmin = callback.From.Id == _adminChatId;
             bool canDelete = isAdmin ||
                              (postToRemove != null && callback.From.Id == postToRemove.ChatId);
@@ -271,46 +269,65 @@ public class CallbackHandler
 
             try
             {
-                // Жодного хардкоду — канал беремо з конфігурації/Program
-                var channel = new ChatId(Program.ChannelUsername);
-
                 // 1) Спочатку видаляємо повідомлення з каналу
+                var channel = new ChatId(Program.ChannelUsername);
                 await botClient.DeleteMessageAsync(
                     chatId: channel,
                     messageId: msgIdToDelete,
                     cancellationToken: cancellationToken);
+
+                // 2) Telegram підтвердив видалення — тепер чистимо БД
+                if (postToRemove != null)
+                {
+                    await _confirmedPaymentsService.RemoveAsync(postToRemove);
+
+                    try
+                    {
+                        var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgIdToDelete);
+                        if (affected == 0)
+                        {
+                            await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        Console.WriteLine($"⚠️ Не вдалося почистити чернетки для msgId={msgIdToDelete}: {ex2.Message}");
+                    }
+                }
+
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: "✅ Оголошення видалено.",
+                    cancellationToken: cancellationToken);
+            }
+            catch (Telegram.Bot.Exceptions.ApiRequestException ex)
+            {
+                // Поширені кейси: >48 год, немає прав delete_messages тощо
+                var text = ex.Message.Contains("can't be deleted", StringComparison.OrdinalIgnoreCase)
+                    ? "⚠️ Пост старіший за 48 год — Telegram не дозволяє боту його видалити. Зверніться до адміна каналу."
+                    : $"⛔ Не вдалося видалити пост: {ex.Message}";
+
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: text,
+                    cancellationToken: cancellationToken);
+
+                // ВАЖЛИВО: БД НЕ ЧІПАЄМО при помилці Telegram!
+                Console.WriteLine($"❌ DeleteMessage fail for msgId={msgIdToDelete}: {ex.Message}");
+                return;
             }
             catch (Exception ex)
             {
-                // Якщо повідомлення вже видалене/недоступне — продовжимо чистку БД
-                var _ = ex; // no-op, або лог
+                await botClient.AnswerCallbackQueryAsync(
+                    callbackQueryId: callback.Id,
+                    text: $"⛔ Помилка видалення: {ex.Message}",
+                    cancellationToken: cancellationToken);
+                Console.WriteLine($"❌ Unexpected delete error for msgId={msgIdToDelete}: {ex}");
+                // БД теж не чіпаємо
+                return;
             }
-
-            // 2) Потім (якщо є) чистимо БД
-            if (postToRemove != null)
-            {
-                try
-                {
-                    await _confirmedPaymentsService.RemoveAsync(postToRemove);
-                }
-                catch { /* no-op */ }
-
-                try
-                {
-                    var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgIdToDelete);
-                    if (affected == 0)
-                    {
-                        await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
-                    }
-                }
-                catch { /* no-op */ }
-            }
-
-            await botClient.AnswerCallbackQueryAsync(
-                callbackQueryId: callback.Id,
-                text: "✅ Оголошення видалено.",
-                cancellationToken: cancellationToken);
         }
+
     }
     #region Subscription Check
     private static async Task<bool> IsSubscribedAsync(

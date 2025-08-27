@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Services;
 using Services.Interfaces;
+using Telegram.Bot.Exceptions;
 
 public class AutoCleanupService
 {
@@ -14,7 +15,7 @@ public class AutoCleanupService
     private readonly ITelegramBotClient _botClient;
     private readonly CancellationToken _cancellationToken;
 
-    // 47 години поріг для авто-видалення
+    // 47 годин поріг для авто-видалення
     private static readonly TimeSpan CleanupAge = TimeSpan.FromHours(47);
 
     public AutoCleanupService(
@@ -46,14 +47,14 @@ public class AutoCleanupService
                         continue;
 
                     var age = now - post.PublishedAt.Value;
-                    Console.WriteLine($"Age:{age}\nPublished:{post.PublishedAt.Value}");
+                    Console.WriteLine($"Age:{age}\nPublished:{post.PublishedAt.Value:O}\nMsgId:{post.ChannelMessageId}");
 
                     if (age >= CleanupAge)
                     {
                         try
                         {
                             // 1) Спочатку видаляємо повідомлення з каналу
-                            var channel = Program.ChannelUsername; // без хардкоду
+                            var channel = new ChatId(Program.ChannelUsername);
                             await _botClient.DeleteMessageAsync(
                                 chatId: channel,
                                 messageId: post.ChannelMessageId.Value,
@@ -68,21 +69,28 @@ public class AutoCleanupService
                                 await _postDraftSeevice.RemoveByPostIdAsync(payment.PostId);
                             }
 
-                            Console.WriteLine($"🧹 Видалено пост ID={payment.Id}, вік: {age.TotalHours:F1} год");
+                            Console.WriteLine($"🧹 Видалено пост ID={payment.Id}, вік: {age.TotalHours:F1} год, msgId={post.ChannelMessageId.Value}");
+                        }
+                        catch (ApiRequestException ex)
+                        {
+                            // Буває: >48 год, немає прав delete_messages, "message to delete not found" тощо.
+                            Console.WriteLine($"⚠️ Cleanup: не вдалося видалити msgId={post.ChannelMessageId.Value}: {ex.Message}");
+                            // ВАЖЛИВО: при помилці Telegram — не видаляємо рядки з БД.
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"⚠️ Помилка при видаленні поста ID={payment.Id}: {ex.Message}");
+                            Console.WriteLine($"❌ Cleanup unexpected error for msgId={post.ChannelMessageId.Value}: {ex}");
+                            // БД також не чіпаємо
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ AutoCleanupService error: {ex.Message}");
+                Console.WriteLine($"❌ AutoCleanupService error: {ex}");
             }
 
-            // Частота перевірок: кожні 3 години 
+            // Частота перевірок: кожні 1 годину
             await Task.Delay(TimeSpan.FromHours(1), _cancellationToken);
         }
     }
