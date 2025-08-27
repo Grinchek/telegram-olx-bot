@@ -250,13 +250,10 @@ public class CallbackHandler
                 return;
             }
 
-            // Спробуємо знайти запис у БД (НЕ обов'язково для видалення)
             var postToRemove = await _confirmedPaymentsService.GetByChannelMessageIdAsync(msgIdToDelete);
 
-            // Перевірка прав:
             bool isAdmin = callback.From.Id == _adminChatId;
-            bool canDelete = isAdmin ||
-                             (postToRemove != null && callback.From.Id == postToRemove.ChatId);
+            bool canDelete = isAdmin || (postToRemove != null && callback.From.Id == postToRemove.ChatId);
 
             if (!canDelete)
             {
@@ -267,31 +264,36 @@ public class CallbackHandler
                 return;
             }
 
+            Console.WriteLine($"[DELETE_BTN] request by {callback.From.Id}, msgId={msgIdToDelete}, postId={(postToRemove?.PostId.ToString() ?? "null")}");
+
             try
             {
-                // 1) Спочатку видаляємо повідомлення з каналу
                 var channel = new ChatId(Program.ChannelUsername);
                 await botClient.DeleteMessageAsync(
                     chatId: channel,
                     messageId: msgIdToDelete,
                     cancellationToken: cancellationToken);
 
-                // 2) Telegram підтвердив видалення — тепер чистимо БД
+                Console.WriteLine($"[DELETE_BTN] TG deleted msgId={msgIdToDelete} OK");
+
                 if (postToRemove != null)
                 {
                     await _confirmedPaymentsService.RemoveAsync(postToRemove);
+                    Console.WriteLine($"[DELETE_BTN] DB removed ConfirmedPaymentId={postToRemove.Id}");
 
                     try
                     {
                         var affected = await _postDraftSeevice.RemoveByChannelMessageIdAsync(msgIdToDelete);
+                        Console.WriteLine($"[DELETE_BTN] DB drafts removed by msgId affected={affected}");
                         if (affected == 0)
                         {
                             await _postDraftSeevice.RemoveByPostIdAsync(postToRemove.PostId);
+                            Console.WriteLine($"[DELETE_BTN] DB drafts removed by postId={postToRemove.PostId}");
                         }
                     }
                     catch (Exception ex2)
                     {
-                        Console.WriteLine($"⚠️ Не вдалося почистити чернетки для msgId={msgIdToDelete}: {ex2.Message}");
+                        Console.WriteLine($"[DELETE_BTN] WARN drafts cleanup failed: {ex2.Message}");
                     }
                 }
 
@@ -302,31 +304,32 @@ public class CallbackHandler
             }
             catch (Telegram.Bot.Exceptions.ApiRequestException ex)
             {
-                // Поширені кейси: >48 год, немає прав delete_messages тощо
                 var text = ex.Message.Contains("can't be deleted", StringComparison.OrdinalIgnoreCase)
-                    ? "⚠️ Пост старіший за 48 год — Telegram не дозволяє боту його видалити. Зверніться до адміна каналу."
+                    ? "⚠️ Пост старіший за 48 год або немає прав — Telegram не дозволяє боту його видалити."
                     : $"⛔ Не вдалося видалити пост: {ex.Message}";
 
+                Console.WriteLine($"[DELETE_BTN] TG delete FAIL msgId={msgIdToDelete}: {ex.Message}");
                 await botClient.AnswerCallbackQueryAsync(
                     callbackQueryId: callback.Id,
                     text: text,
                     cancellationToken: cancellationToken);
 
-                // ВАЖЛИВО: БД НЕ ЧІПАЄМО при помилці Telegram!
-                Console.WriteLine($"❌ DeleteMessage fail for msgId={msgIdToDelete}: {ex.Message}");
+                // БД не чіпаємо!
                 return;
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"[DELETE_BTN] UNEXPECTED err msgId={msgIdToDelete}: {ex}");
                 await botClient.AnswerCallbackQueryAsync(
                     callbackQueryId: callback.Id,
                     text: $"⛔ Помилка видалення: {ex.Message}",
                     cancellationToken: cancellationToken);
-                Console.WriteLine($"❌ Unexpected delete error for msgId={msgIdToDelete}: {ex}");
-                // БД теж не чіпаємо
+                // БД не чіпаємо!
                 return;
             }
         }
+
+
 
     }
     #region Subscription Check

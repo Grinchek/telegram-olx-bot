@@ -154,6 +154,7 @@ public partial class Program
             var me = await botClient.GetMeAsync(cancellationToken);
             Console.WriteLine($"🤖 Bot @{me.Username} is running...");
 
+
             var updateRouter = scopedProvider.GetRequiredService<UpdateRouter>();
 
             botClient.StartReceiving(
