@@ -16,7 +16,7 @@ public class AutoCleanupService
     private readonly CancellationToken _cancellationToken;
 
     // 47 годин поріг для авто-видалення
-    private static readonly TimeSpan CleanupAge = TimeSpan.FromHours(47);
+    private static readonly TimeSpan CleanupAge = TimeSpan.FromHours(45);
 
     public AutoCleanupService(
         IConfirmedPaymentsService confirmedPaymentsService,

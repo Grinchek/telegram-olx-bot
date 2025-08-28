@@ -21,8 +21,7 @@ public class BotDbContext : DbContext
             .HasOne(p => p.Post)
             .WithMany()
             .HasForeignKey(p => p.PostId)
-            .OnDelete(DeleteBehavior.Cascade);
-
+            .OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<ConfirmedPayment>(entity =>
         {
@@ -32,7 +31,7 @@ public class BotDbContext : DbContext
             entity.HasOne(p => p.Post)
                   .WithMany()
                   .HasForeignKey(nameof(ConfirmedPayment.PostId))
-                  .OnDelete(DeleteBehavior.Cascade);
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<PostData>(entity =>
@@ -49,4 +48,5 @@ public class BotDbContext : DbContext
 
         base.OnModelCreating(modelBuilder);
     }
+
 }
