@@ -65,9 +65,10 @@ namespace Bot
                 else
                 {
                     await botClient.SendTextMessageAsync(chatId,
-                        $"🔗 Надішли оголошення з OLX у будь-який зручний спосіб:\n\n" +
+                        $"🔗 Надішли оголошення з OLX або Shafa у будь-який зручний спосіб:\n\n" +
                         $"• Встав посилання вручну, або\n" +
-                        $"• Поділися оголошенням через кнопку \"Поділитися\" в OLX.\n\n" +
+                        $"• Поділися оголошенням через кнопку \"Поділитися\" у застосунку/на сайті.\n\n"+
+
                         $"📊 Сьогодні вже опубліковано: <b>{current}</b>/100\n" +
                         $"🕐 Залишилось місць: <b>{remaining}</b>",
                         parseMode: ParseMode.Html,
@@ -81,26 +82,33 @@ namespace Bot
             else if (text == "📢 Перейти на канал")
             {
                 await botClient.SendTextMessageAsync(chatId,
-                    "📬 <a href=\"https://t.me/baraholka_market_ua\">Перейти на канал</a>",
+                    "📬 <a href=\"https://t.me/+-90fie9HmXhhMjUy\">Перейти на канал</a>",
                     parseMode: ParseMode.Html,
                     cancellationToken: cancellationToken);
                 return;
             }
 
             // 3) Спроба дістати OLX‑URL з будь-якого типу повідомлення (текст, підпис до фото/відео, «Поділитися» тощо)
-            var olxUrl = ExtractOlxUrl(message);
-            if (!string.IsNullOrEmpty(olxUrl))
+            // 3) Спроба дістати URL з повідомлення (OLX або Shafa)
+            var anyUrl = ExtractUrl(message);
+            if (!string.IsNullOrEmpty(anyUrl))
             {
                 await botClient.SendTextMessageAsync(chatId, "⏳ Парсинг оголошення...", cancellationToken: cancellationToken);
 
                 try
                 {
-                    var postData = await OlxParser.ParseOlxAsync(olxUrl!);
+                    PostData postData;
+                    if (IsOlxUrl(anyUrl))
+                        postData = await OlxParser.ParseOlxAsync(anyUrl!);
+                    else if (IsShafaUrl(anyUrl))
+                        postData = await ShafaParser.ParseShafaAsync(anyUrl!);
+                    else
+                        throw new Exception("Непідтримуване посилання.");
+
                     postData.ImageUrl ??= "https://via.placeholder.com/300";
-                    // Зберігаємо в чернетки
+
                     await _postDraftService.SaveDraftAsync(chatId, postData);
 
-                    // Додаємо до очікуваних платежів
                     await Program.PendingPaymentsService.AddAsync(new PendingPayment
                     {
                         ChatId = chatId,
@@ -108,14 +116,14 @@ namespace Bot
                         RequestedAt = DateTime.UtcNow
                     });
 
-                    var caption = CaptionBuilder.Build(postData, false, _botUsername);
+                    var caption = CaptionBuilder.Build(postData, false, _botUsername); // існуюча утиліта :contentReference[oaicite:5]{index=5}
 
                     await botClient.SendPhotoAsync(
                         chatId,
                         InputFile.FromUri(postData.ImageUrl ?? "https://via.placeholder.com/300"),
                         caption: caption,
                         parseMode: ParseMode.Html,
-                        replyMarkup: KeyboardFactory.ConfirmButtons(),
+                        replyMarkup: KeyboardFactory.ConfirmButtons(), // існуюча клавіатура :contentReference[oaicite:6]{index=6}
                         cancellationToken: cancellationToken);
                 }
                 catch (Exception ex)
@@ -126,9 +134,10 @@ namespace Bot
                 return;
             }
 
+
             // 4) Фолбек — підказка користувачу
             await botClient.SendTextMessageAsync(chatId,
-                "⚠️ Надішли посилання на OLX або скористайся кнопкою ‘Поділитися’ в OLX.\nЯкщо що — користуйся кнопками нижче 👇",
+                "⚠️ Надішли посилання на OLX або Shafa (можна скористатися «Поділитися»).\nЯкщо що — користуйся кнопками нижче 👇",
                 replyMarkup: KeyboardFactory.MainButtons(),
                 cancellationToken: cancellationToken);
         }
@@ -224,6 +233,35 @@ namespace Bot
                          .FirstOrDefault();
             return m;
         }
+        private static string? ExtractUrl(Message message)
+        {
+            var fromText = ExtractFromTextAndEntities(message.Text, message.Entities);
+            if (IsOlxUrl(fromText) || IsShafaUrl(fromText)) return NormalizeUrl(fromText);
+
+            var fromCaption = ExtractFromTextAndEntities(message.Caption, message.CaptionEntities);
+            if (IsOlxUrl(fromCaption) || IsShafaUrl(fromCaption)) return NormalizeUrl(fromCaption);
+
+            var any = FirstUrlLike(message.Text) ?? FirstUrlLike(message.Caption);
+            if (IsOlxUrl(any) || IsShafaUrl(any)) return NormalizeUrl(any);
+
+            return null;
+        }
+
+        private static bool IsShafaUrl(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            var candidate = FirstUrlLike(url.Trim()) ?? url.Trim();
+
+            if (!candidate.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) &&
+                !candidate.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase))
+            {
+                candidate = "https://" + candidate;
+            }
+
+            return System.Uri.TryCreate(candidate, System.UriKind.Absolute, out var uri)
+                   && (uri.Host.Contains("shafa.ua", System.StringComparison.OrdinalIgnoreCase));
+        }
+
     }
 }
 
