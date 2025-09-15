@@ -1,64 +1,63 @@
 ﻿using Telegram.Bot;
-using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
 using Data.Entities;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Bot;
 
-namespace Services;
-
-public class PostPublisher
+namespace Services
 {
-    private readonly ITelegramBotClient _botClient;
-
-    public PostPublisher(ITelegramBotClient botClient)
+    public class PostPublisher
     {
-        _botClient = botClient;
-    }
+        private readonly ITelegramBotClient _bot;
 
-    public async Task<int> PublishPostAsync(PostData post, long originalChatId, bool isAdmin, CancellationToken cancellationToken = default)
-    {
-        if (post == null) throw new ArgumentNullException(nameof(post));
+        public PostPublisher(ITelegramBotClient botClient) => _bot = botClient;
 
-        var caption = CaptionBuilder.Build(post, isAdmin, Program.BotUsername);
-        var imageUrl = string.IsNullOrWhiteSpace(post.ImageUrl)
-            ? "https://via.placeholder.com/300"
-            : post.ImageUrl;
-
-        // Єдине джерело правди для каналу
-        var channel = Program.ChannelUsername;
-
-        try
+        public async Task<int> PublishPostAsync(PostData post, long originalChatId, bool isAdmin, CancellationToken ct = default)
         {
-            // Надсилаємо фото одразу з кнопкою "Видалити", без додаткового редагування
-            var result = await _botClient.SendPhotoAsync(
-                chatId: channel,
-                photo: InputFile.FromUri(imageUrl),
-                caption: caption,
-                parseMode: ParseMode.Html,
-                replyMarkup: KeyboardFactory.DeleteButtonByMessageId(0), // тимчасово 0, замінимо нижче, Telegram дозволяє лише під час Edit
-                cancellationToken: cancellationToken
-            );
+            if (post == null) throw new ArgumentNullException(nameof(post));
 
-            // Telegram не знає messageId в момент побудови клавіатури, тому оновимо markup після відправки
-            post.ChannelMessageId = result.MessageId;
+            var caption = CaptionBuilder.Build(post, isAdmin, Program.BotUsername);
+            post.ImageUrl ??= "https://via.placeholder.com/300";
+            var channel = Program.ChannelUsername;
 
-            await _botClient.EditMessageReplyMarkupAsync(
-                chatId: channel,
-                messageId: result.MessageId,
-                replyMarkup: KeyboardFactory.DeleteButtonByMessageId(result.MessageId),
-                cancellationToken: cancellationToken
-            );
+            var media = await InstagramMedia.BuildAsync(post.SourceUrl, post.ImageUrl);
 
-            return result.MessageId;
-        }
-        catch (Exception ex)
-        {
-            // Можеш замінити на власний логер
-            Console.WriteLine($"❌ Помилка публікації поста: {ex.Message}");
-            throw;
+            // Надсилаємо з тимчасовою клавіатурою (messageId невідомий)
+            var dummyMarkup = KeyboardFactory.DeleteButtonByMessageId(0);
+            Message sent;
+
+            switch (media.Kind)
+            {
+                case "video":
+                    await using (var ms = new System.IO.MemoryStream(media.Bytes!))
+                        sent = await _bot.SendVideoAsync(channel, InputFile.FromStream(ms, media.FileName),
+                            caption: caption, parseMode: ParseMode.Html, replyMarkup: dummyMarkup, supportsStreaming: true, cancellationToken: ct);
+                    break;
+                case "photo":
+                    await using (var ms = new System.IO.MemoryStream(media.Bytes!))
+                        sent = await _bot.SendPhotoAsync(channel, InputFile.FromStream(ms, media.FileName),
+                            caption: caption, parseMode: ParseMode.Html, replyMarkup: dummyMarkup, cancellationToken: ct);
+                    break;
+                case "document":
+                    await using (var ms = new System.IO.MemoryStream(media.Bytes!))
+                        sent = await _bot.SendDocumentAsync(channel, InputFile.FromStream(ms, media.FileName),
+                            caption: caption, parseMode: ParseMode.Html, replyMarkup: dummyMarkup, cancellationToken: ct);
+                    break;
+                default:
+                    sent = await _bot.SendPhotoAsync(channel, InputFile.FromUri(media.DirectUrl!),
+                            caption: caption, parseMode: ParseMode.Html, replyMarkup: dummyMarkup, cancellationToken: ct);
+                    break;
+            }
+
+            // оновлюємо клавіатуру, коли вже знаємо messageId
+            post.ChannelMessageId = sent.MessageId;
+            await _bot.EditMessageReplyMarkupAsync(channel, sent.MessageId, KeyboardFactory.DeleteButtonByMessageId(sent.MessageId), cancellationToken: ct);
+
+            return sent.MessageId;
         }
     }
 }
