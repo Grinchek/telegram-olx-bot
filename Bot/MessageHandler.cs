@@ -1,15 +1,16 @@
-﻿using Telegram.Bot;
+﻿//// /Bot/MessageHandler.cs
+using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
-using Telegram.Bot.Types.ReplyMarkups;
 using Services;
 using Services.Interfaces;
 using Data.Entities;
+using Telegram.Bot.Types.ReplyMarkups;
+using System.Threading.Tasks;
+using System.Threading;
 using System;
 using System.Linq;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace Bot
 {
@@ -32,112 +33,235 @@ namespace Bot
             IConfirmedPaymentsService confirmedPaymentsService,
             CancellationToken cancellationToken)
         {
-            var msg = update.Message;
-            if (msg == null) return;
+            var message = update.Message;
+            if (message == null)
+                return;
 
-            // команди
-            if (!string.IsNullOrEmpty(msg.Text) && msg.Text.StartsWith("/"))
+            var chatId = message.Chat.Id;
+            var text = message.Text;
+
+            // 1) Команди
+            if (!string.IsNullOrEmpty(text) && text.StartsWith("/"))
             {
-                await CommandHandler.HandleCommandAsync(botClient, msg, confirmedPaymentsService, _postDraftService, cancellationToken);
+                await CommandHandler.HandleCommandAsync(botClient, message, confirmedPaymentsService, _postDraftService, cancellationToken);
                 return;
             }
 
-            // кнопки
-            if (msg.Text == "📤 Опублікувати оголошення")
+            // 2) Кнопки головного меню
+            if (text == "📤 Опублікувати оголошення")
             {
-                var used = await _postCounterService.GetCurrentCountAsync();
-                var left = 100 - used;
-                var text = left <= 0
-                    ? "❌ Денний ліміт публікацій вичерпано. Спробуй завтра."
-                    : $"🔗 Надішли посилання з OLX/Shafa/Instagram.\n📊 Сьогодні: <b>{used}</b>/100, залишилось <b>{left}</b>.";
-                await botClient.SendTextMessageAsync(
-                     chatId: msg.Chat.Id,
-                     text: text,
-                     parseMode: ParseMode.Html,
-                     replyMarkup: KeyboardFactory.MainButtons(),
-                     cancellationToken: cancellationToken);
-                return;
+                var current = await _postCounterService.GetCurrentCountAsync();
+                var remaining = 100 - current;
+
+                if (remaining <= 0)
+                {
+                    await botClient.SendTextMessageAsync(chatId,
+                        "❌ Денний ліміт публікацій вичерпано. Спробуй завтра.",
+                        parseMode: ParseMode.Html,
+                        replyMarkup: KeyboardFactory.MainButtons(),
+                        cancellationToken: cancellationToken);
+                    return;
+                }
+                else
+                {
+                    await botClient.SendTextMessageAsync(chatId,
+                        $"🔗 Надішли оголошення з OLX або Shafa у будь-який зручний спосіб:\n\n" +
+                        $"• Встав посилання вручну, або\n" +
+                        $"• Поділися оголошенням через кнопку \"Поділитися\" у застосунку/на сайті.\n\n"+
+
+                        $"📊 Сьогодні вже опубліковано: <b>{current}</b>/100\n" +
+                        $"🕐 Залишилось місць: <b>{remaining}</b>",
+                        parseMode: ParseMode.Html,
+                        replyMarkup: KeyboardFactory.MainButtons(),
+                        cancellationToken: cancellationToken);
+                    return;
+
+                }
+                    
             }
-            if (msg.Text == "📢 Перейти на канал")
+            else if (text == "📢 Перейти на канал")
             {
-                await botClient.SendTextMessageAsync(
-                    chatId: msg.Chat.Id,
-                    text: "📬 <a href=\"https://t.me/+-90fie9HmXhhMjUy\">Перейти на канал</a>",
+                await botClient.SendTextMessageAsync(chatId,
+                    "📬 <a href=\"https://t.me/+-90fie9HmXhhMjUy\">Перейти на канал</a>",
                     parseMode: ParseMode.Html,
                     cancellationToken: cancellationToken);
                 return;
             }
 
-            // лінк
-            var url = ExtractUrl(msg);
-            if (string.IsNullOrWhiteSpace(url))
+            // 3) Спроба дістати OLX‑URL з будь-якого типу повідомлення (текст, підпис до фото/відео, «Поділитися» тощо)
+            // 3) Спроба дістати URL з повідомлення (OLX або Shafa)
+            var anyUrl = ExtractUrl(message);
+            if (!string.IsNullOrEmpty(anyUrl))
             {
-                await botClient.SendTextMessageAsync(
-                    chatId: msg.Chat.Id,
-                    text: "⚠️ Надішли посилання на OLX, Shafa або Instagram (можна скористатися «Поділитися»).\nЯкщо що — користуйся кнопками нижче 👇",
-                    parseMode: ParseMode.Html,
-                    replyMarkup: KeyboardFactory.MainButtons(),
-                    cancellationToken: cancellationToken);
+                await botClient.SendTextMessageAsync(chatId, "⏳ Парсинг оголошення...", cancellationToken: cancellationToken);
+
+                try
+                {
+                    PostData postData;
+                    if (IsOlxUrl(anyUrl))
+                        postData = await OlxParser.ParseOlxAsync(anyUrl!);
+                    else if (IsShafaUrl(anyUrl))
+                        postData = await ShafaParser.ParseShafaAsync(anyUrl!);
+                    else
+                        throw new Exception("Непідтримуване посилання.");
+
+                    postData.ImageUrl ??= "https://via.placeholder.com/300";
+
+                    await _postDraftService.SaveDraftAsync(chatId, postData);
+
+                    await Program.PendingPaymentsService.AddAsync(new PendingPayment
+                    {
+                        ChatId = chatId,
+                        PostId = postData.Id,
+                        RequestedAt = DateTime.UtcNow
+                    });
+
+                    var caption = CaptionBuilder.Build(postData, false, _botUsername); // існуюча утиліта :contentReference[oaicite:5]{index=5}
+
+                    await botClient.SendPhotoAsync(
+                        chatId,
+                        InputFile.FromUri(postData.ImageUrl ?? "https://via.placeholder.com/300"),
+                        caption: caption,
+                        parseMode: ParseMode.Html,
+                        replyMarkup: KeyboardFactory.ConfirmButtons(), // існуюча клавіатура :contentReference[oaicite:6]{index=6}
+                        cancellationToken: cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    await botClient.SendTextMessageAsync(chatId, $"⚠️ Помилка: {ex.Message}", cancellationToken: cancellationToken);
+                }
+
                 return;
             }
 
-            await botClient.SendTextMessageAsync(msg.Chat.Id, "⏳ Парсинг оголошення...", cancellationToken: cancellationToken);
 
-            try
+            // 4) Фолбек — підказка користувачу
+            await botClient.SendTextMessageAsync(chatId,
+                "⚠️ Надішли посилання на OLX або Shafa (можна скористатися «Поділитися»).\nЯкщо що — користуйся кнопками нижче 👇",
+                replyMarkup: KeyboardFactory.MainButtons(),
+                cancellationToken: cancellationToken);
+        }
+
+        /// <summary>
+        /// Витягує перший валідний OLX‑URL з повідомлення у різних сценаріях:
+        ///  - звичайний текст (включно з додатковим описом)
+        ///  - посилання у текстових ентитях (Url / TextLink)
+        ///  - підпис до медіа (caption / caption_entities)
+        ///  - «Поділитися» з OLX (зазвичай приходить як текст з превʼю)
+        /// </summary>
+        private static string? ExtractOlxUrl(Message message)
+        {
+            // 1) Перевіряємо текст + ентиті
+            var fromText = ExtractFromTextAndEntities(message.Text, message.Entities);
+            if (IsOlxUrl(fromText)) return NormalizeUrl(fromText);
+
+            // 2) Перевіряємо підпис до медіа + ентиті підпису
+            var fromCaption = ExtractFromTextAndEntities(message.Caption, message.CaptionEntities);
+            if (IsOlxUrl(fromCaption)) return NormalizeUrl(fromCaption);
+
+            // 3) Фолбек: regex по тексту і підпису
+            var any = FirstUrlLike(message.Text) ?? FirstUrlLike(message.Caption);
+            if (IsOlxUrl(any)) return NormalizeUrl(any);
+
+            return null;
+        }
+
+        private static string? ExtractFromTextAndEntities(string? text, MessageEntity[]? entities)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            if (entities != null && entities.Length > 0)
             {
-                PostData post =
-                    Is(url, "olx") ? await OlxParser.ParseOlxAsync(url) :
-                    Is(url, "shafa") ? await ShafaParser.ParseShafaAsync(url) :
-                    /* insta */        await InstagramParser.ParseInstagramAsync(url);
-
-                post.ImageUrl ??= "https://via.placeholder.com/300";
-                await _postDraftService.SaveDraftAsync(msg.Chat.Id, post);
-                await Program.PendingPaymentsService.AddAsync(new PendingPayment { ChatId = msg.Chat.Id, PostId = post.Id, RequestedAt = DateTime.UtcNow });
-
-                var caption = CaptionBuilder.Build(post, false, _botUsername);
-                var media = await InstagramMedia.BuildAsync(post.SourceUrl, post.ImageUrl);
-                await InstagramMedia.SendAsync(botClient, msg.Chat.Id, media, caption, KeyboardFactory.ConfirmButtons(), cancellationToken);
+                // Пріоритет: явні ентиті URL або TextLink
+                var urlFromEntities = entities
+                    .Where(e => e.Type == MessageEntityType.Url || e.Type == MessageEntityType.TextLink)
+                    .Select(e => e.Type == MessageEntityType.TextLink
+                        ? e.Url
+                        : SafeSubstring(text, e.Offset, e.Length))
+                    .FirstOrDefault(u => IsOlxUrl(u));
+                if (!string.IsNullOrEmpty(urlFromEntities)) return urlFromEntities;
             }
-            catch (Exception ex)
+            return text; // повертаємо як є — далі відфільтруємо
+        }
+
+        private static string? SafeSubstring(string source, int offset, int length)
+        {
+            if (string.IsNullOrEmpty(source)) return null;
+            if (offset < 0 || length <= 0 || offset >= source.Length) return null;
+            var maxLen = Math.Min(length, source.Length - offset);
+            return source.Substring(offset, maxLen);
+        }
+
+        private static bool IsOlxUrl(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+
+            var candidate = url.Trim();
+            // Якщо це шматок тексту — дістанемо перший URL‑підрядок
+            candidate = FirstUrlLike(candidate) ?? candidate;
+
+            if (!candidate.Contains("olx", StringComparison.OrdinalIgnoreCase)) return false;
+
+            // Додаткова валідація URL
+            if (!candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                await botClient.SendTextMessageAsync(msg.Chat.Id, $"⚠️ Помилка: {ex.Message}", cancellationToken: cancellationToken);
+                candidate = "https://" + candidate;
             }
+
+            return Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
+                   && (uri.Host.Contains("olx", StringComparison.OrdinalIgnoreCase));
         }
 
-        // ===== helpers =====
-        private static bool Is(string url, string key) => url.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0;
-
-        private static string? ExtractUrl(Message m)
+        private static string NormalizeUrl(string? url)
         {
-            string? fromEnt(string? t, MessageEntity[]? e) =>
-                e?.FirstOrDefault(x => x.Type is MessageEntityType.Url or MessageEntityType.TextLink) is { } me
-                    ? (me.Type == MessageEntityType.TextLink ? me.Url : SafeSub(t, me.Offset, me.Length))
-                    : null;
-
-            var u = fromEnt(m.Text, m.Entities) ?? fromEnt(m.Caption, m.CaptionEntities) ?? FirstUrlLike(m.Text) ?? FirstUrlLike(m.Caption);
-            return Normalize(u);
+            if (string.IsNullOrWhiteSpace(url)) return url ?? string.Empty;
+            var candidate = FirstUrlLike(url) ?? url.Trim();
+            if (!candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                candidate = "https://" + candidate;
+            }
+            return candidate;
         }
 
-        private static string Normalize(string? url)
+        private static string? FirstUrlLike(string? text)
         {
-            if (string.IsNullOrWhiteSpace(url)) return url ?? "";
-            var s = url.Trim();
-            if (!s.StartsWith("http", StringComparison.OrdinalIgnoreCase)) s = "https://" + s;
-            return s;
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            var m = Regex.Matches(text, @"https?://[^\s]+|(?:www\.)?[^\s]+\.[^\s]+")
+                         .Cast<Match>()
+                         .Select(x => x.Value)
+                         .FirstOrDefault();
+            return m;
+        }
+        private static string? ExtractUrl(Message message)
+        {
+            var fromText = ExtractFromTextAndEntities(message.Text, message.Entities);
+            if (IsOlxUrl(fromText) || IsShafaUrl(fromText)) return NormalizeUrl(fromText);
+
+            var fromCaption = ExtractFromTextAndEntities(message.Caption, message.CaptionEntities);
+            if (IsOlxUrl(fromCaption) || IsShafaUrl(fromCaption)) return NormalizeUrl(fromCaption);
+
+            var any = FirstUrlLike(message.Text) ?? FirstUrlLike(message.Caption);
+            if (IsOlxUrl(any) || IsShafaUrl(any)) return NormalizeUrl(any);
+
+            return null;
         }
 
-        private static string? FirstUrlLike(string? t)
+        private static bool IsShafaUrl(string? url)
         {
-            if (string.IsNullOrWhiteSpace(t)) return null;
-            var m = Regex.Match(t, @"https?://\S+|(?:www\.)?\S+\.\S+");
-            return m.Success ? m.Value : null;
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            var candidate = FirstUrlLike(url.Trim()) ?? url.Trim();
+
+            if (!candidate.StartsWith("http://", System.StringComparison.OrdinalIgnoreCase) &&
+                !candidate.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase))
+            {
+                candidate = "https://" + candidate;
+            }
+
+            return System.Uri.TryCreate(candidate, System.UriKind.Absolute, out var uri)
+                   && (uri.Host.Contains("shafa.ua", System.StringComparison.OrdinalIgnoreCase));
         }
 
-        private static string? SafeSub(string? s, int off, int len)
-        {
-            if (string.IsNullOrEmpty(s) || off < 0 || len <= 0 || off >= s.Length) return null;
-            len = Math.Min(len, s.Length - off);
-            return s.Substring(off, len);
-        }
     }
 }
+
