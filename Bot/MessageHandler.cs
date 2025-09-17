@@ -109,7 +109,7 @@ namespace Bot
             else if (text == "📢 Перейти на канал")
             {
                 await botClient.SendTextMessageAsync(chatId,
-                    "📬 <a href=\"https://t.me/+-90fie9HmXhhMjUy\">Перейти на канал</a>",
+                    "📬 <a href=\"https://t.me/baraholka_market_ua\">Перейти на канал</a>",
                     parseMode: ParseMode.Html,
                     cancellationToken: cancellationToken);
                 return;
